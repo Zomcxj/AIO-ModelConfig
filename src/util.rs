@@ -178,22 +178,10 @@ pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
 }
 
 pub fn show_file_dialog() -> Option<String> {
-    let out = Command::new("powershell.exe")
-        .args([
-            "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-            "-Command",
-            r#"
-Add-Type -AssemblyName System.Windows.Forms
-$dlg = New-Object System.Windows.Forms.OpenFileDialog
-$dlg.Title = 'Select config file'
-$dlg.Filter = 'JSON files (*.json, *.jsonc)|*.json;*.jsonc|All files|*.*'
-$dlg.CheckFileExists = $false
-$r = $dlg.ShowDialog()
-if ($r -eq 'OK') { $dlg.FileName } else { '' }
-"#,
-        ])
-        .output()
-        .ok()?;
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if p.is_empty() { None } else { Some(p) }
+    rfd::FileDialog::new()
+        .set_title("选择配置文件")
+        .add_filter("JSON", &["json", "jsonc"])
+        .add_filter("所有文件", &["*"])
+        .pick_file()
+        .map(|p| p.to_string_lossy().to_string())
 }

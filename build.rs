@@ -1,21 +1,21 @@
 fn main() {
     let python = "python";
-    if std::path::Path::new("icon.png").exists() {
+    if std::path::Path::new("assets/icon.png").exists() {
         let output = std::process::Command::new(python)
             .args([
                 "-c",
                 r#"
 from PIL import Image
-img = Image.open("icon.png").convert("RGBA")
+img = Image.open("assets/icon.png").convert("RGBA")
 img.thumbnail((256, 256), Image.LANCZOS)
-img.save("icon.ico")
+img.save("assets/icon.ico")
 w, h = img.size
 if w != 256 or h != 256:
     new_img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
     new_img.paste(img, ((256 - w) // 2, (256 - h) // 2))
     img = new_img
 img = img.resize((256, 256), Image.LANCZOS)
-with open("icon_rgba.bin", "wb") as f:
+with open("assets/icon_rgba.bin", "wb") as f:
     f.write(img.tobytes())
 print("icon ready:", len(img.tobytes()))
 "#,
@@ -49,10 +49,10 @@ print("icon ready:", len(img.tobytes()))
                 }
             }
         }
-        std::fs::write("icon_rgba.bin", &big_rgba).unwrap();
+        std::fs::write("assets/icon_rgba.bin", &big_rgba).unwrap();
     }
 
     let mut res = winres::WindowsResource::new();
-    res.set_icon("icon.ico");
+    res.set_icon("assets/icon.ico");
     res.compile().unwrap();
 }

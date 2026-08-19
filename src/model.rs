@@ -98,11 +98,22 @@ pub struct ModelRow {
     pub output: String,
     pub modalities_input: String,
     pub modalities_output: String,
+    pub variants: String,
     pub raw: Value,
 }
 
 impl ModelRow {
     pub fn from(id: &str, v: &Value) -> Self {
+        let variants = v
+            .get("variants")
+            .map(|val| {
+                if let Some(obj) = val.as_object() {
+                    obj.keys().cloned().collect::<Vec<_>>().join(", ")
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
         Self {
             id: id.to_string(),
             name: str_at(v, "name").to_string(),
@@ -112,6 +123,7 @@ impl ModelRow {
             output: nested_num(v, &["limit", "output"]),
             modalities_input: nested_list_str(v, &["modalities", "input"]),
             modalities_output: nested_list_str(v, &["modalities", "output"]),
+            variants,
             raw: v.clone(),
         }
     }
@@ -126,6 +138,7 @@ impl ModelRow {
             output: String::new(),
             modalities_input: String::new(),
             modalities_output: String::new(),
+            variants: String::new(),
             raw: Value::Object(Map::new()),
         }
     }
@@ -172,6 +185,26 @@ impl ModelRow {
             m.insert("modalities".into(), Value::Object(mo));
         } else {
             m.remove("modalities");
+        }
+        if self.variants.trim().is_empty() {
+            m.remove("variants");
+        } else {
+            let variants_map: Map<String, Value> = self
+                .variants
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|v| {
+                    let mut settings = Map::new();
+                    settings.insert("reasoningEffort".into(), Value::String(v.to_string()));
+                    (v.to_string(), Value::Object(settings))
+                })
+                .collect();
+            if !variants_map.is_empty() {
+                m.insert("variants".into(), Value::Object(variants_map));
+            } else {
+                m.remove("variants");
+            }
         }
         Value::Object(m)
     }

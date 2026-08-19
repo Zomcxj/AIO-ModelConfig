@@ -3,7 +3,7 @@
 use eframe::egui;
 use opencode_model_config::app::App;
 
-const ICON_BYTES: &[u8] = include_bytes!("../icon_rgba.bin");
+const ICON_BYTES: &[u8] = include_bytes!("../assets/icon_rgba.bin");
 const ICON_W: u32 = 256;
 const ICON_H: u32 = 256;
 
@@ -20,6 +20,18 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             cc.egui_ctx.set_fonts(build_cjk_fonts());
             cc.egui_ctx.set_style(build_style());
+            #[cfg(target_os = "windows")]
+            {
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = cc.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::Win32(w) = handle.as_raw() {
+                        unsafe {
+                            let hwnd = w.hwnd.get() as *mut core::ffi::c_void;
+                            opencode_model_config::cursor::init_grabbing_cursor(hwnd);
+                        }
+                    }
+                }
+            }
             Ok(Box::new(App::default()))
         }),
     )

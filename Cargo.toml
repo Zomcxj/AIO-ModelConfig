@@ -11,6 +11,16 @@ path = "src/main.rs"
 [dependencies]
 eframe = { version = "0.31", features = ["default"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+]}
+rfd = "0.15"
 
 [build-dependencies]
 winres = "0.1"

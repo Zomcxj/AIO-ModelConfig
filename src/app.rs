@@ -21,8 +21,11 @@ pub struct App {
     show_new_provider: bool,
     agent_open: HashSet<String>,
     provider_open: HashSet<String>,
-    agent_drag_src: Option<usize>,
-    provider_drag_src: Option<usize>,
+    variant_open: HashSet<String>,
+    agent_drag_src: Option<String>,
+    agent_drag_target: Option<String>,
+    provider_drag_src: Option<String>,
+    provider_drag_target: Option<String>,
 }
 
 impl Default for App {
@@ -44,8 +47,11 @@ impl Default for App {
             show_new_provider: false,
             agent_open,
             provider_open,
+            variant_open: HashSet::new(),
             agent_drag_src: None,
+            agent_drag_target: None,
             provider_drag_src: None,
+            provider_drag_target: None,
         }
     }
 }
@@ -67,9 +73,10 @@ impl eframe::App for App {
                 });
         });
         self.paint_drag_ghost(ctx);
-        if self.agent_drag_src.is_some() || self.provider_drag_src.is_some() {
-            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        }
+        let dragging = self.agent_drag_src.is_some() || self.provider_drag_src.is_some();
+        let mouse_down = ctx.input(|i| i.pointer.any_down());
+        #[cfg(target_os = "windows")]
+        crate::cursor::set_custom_cursor_active(dragging || mouse_down);
     }
 }
 
@@ -161,10 +168,15 @@ impl App {
             })
             .collect();
 
+        if self.agents.is_empty() && !self.show_new_agent {
+            self.show_new_agent = true;
+        }
+
         let mut to_remove: Option<usize> = None;
         let mut to_copy: Option<usize> = None;
+        let mut hover_target: Option<String> = None;
         card_grid(ui, &matched, 1, 0.0, |ui, idx| {
-            self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &f);
+            self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &f, &mut hover_target);
         });
         if let Some(idx) = to_remove {
             self.agents.remove(idx);
@@ -176,6 +188,11 @@ impl App {
             a.refresh_haystack();
             self.agents.push(a);
             self.status = "已复制 agent".into();
+        }
+        if self.agent_drag_src.is_some() {
+            self.agent_drag_target = hover_target;
+        } else {
+            self.agent_drag_target = None;
         }
 
         ui.add_space(6.0);
@@ -194,17 +211,36 @@ impl App {
         to_remove: &mut Option<usize>,
         to_copy: &mut Option<usize>,
         _filter: &str,
+        hover_target: &mut Option<String>,
     ) {
         let key = self.agents[idx].key.clone();
         let open = self.agent_open.contains(&key);
-        let resp = card_frame(ui, open, |ui| {
+        let highlight = if self.agent_drag_target.as_deref() == Some(key.as_str()) {
+            2
+        } else if self.agent_drag_src.as_deref() == Some(key.as_str()) {
+            1
+        } else {
+            0
+        };
+        let resp = card_frame(ui, open, highlight, |ui| {
             ui.horizontal(|ui| {
                 let h = ui.add(DragHandle);
                 if h.drag_started() {
-                    self.agent_drag_src = Some(idx);
+                    self.agent_drag_src = Some(key.clone());
+                    self.agent_drag_target = None;
                 }
                 if h.drag_stopped() {
+                    if self.agent_drag_src == Some(key.clone()) {
+                        if let Some(dst) = self.agent_drag_target.clone() {
+                            let s = self.agents.iter().position(|a| a.key == key);
+                            let d = self.agents.iter().position(|a| a.key == dst);
+                            if let (Some(s), Some(d)) = (s, d) {
+                                move_item(&mut self.agents, s, d);
+                            }
+                        }
+                    }
                     self.agent_drag_src = None;
+                    self.agent_drag_target = None;
                 }
                 if ui
                     .add(
@@ -235,10 +271,9 @@ impl App {
                 self.render_agent_form(ui, idx);
             }
         });
-        if let Some(src) = self.agent_drag_src {
-            if resp.hovered() && src != idx {
-                move_item(&mut self.agents, src, idx);
-                self.agent_drag_src = Some(idx);
+        if let Some(src_key) = &self.agent_drag_src {
+            if src_key != &key && resp.contains_pointer() && hover_target.is_none() {
+                *hover_target = Some(key.clone());
             }
         }
     }
@@ -258,16 +293,67 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("description").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut a.description).desired_width(560.0));
+            ui.add(egui::TextEdit::singleline(&mut a.description).desired_width(450.0));
         });
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("model").weak()));
-            ui.add(egui::TextEdit::singleline(&mut a.model).desired_width(120.0));
+            let mut model_options: Vec<String> = self
+                .providers
+                .iter()
+                .flat_map(|p| p.models.iter().map(|m| format!("{}/{}", p.key, m.id)))
+                .collect();
+            model_options.extend_from_slice(&[
+                "opencode/mimo-v2.5-free".into(),
+                "opencode/deepseek-v4-flash-free".into(),
+            ]);
+            model_options.sort();
+            model_options.dedup();
+            let current = a.model.clone();
+            let mut selected_idx = model_options.iter().position(|m| m == &current);
+            egui::ComboBox::from_id_salt(format!("agent_model_{}", a.key))
+                .selected_text(if current.is_empty() {
+                    "选择模型..."
+                } else {
+                    &current
+                })
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    for (i, model) in model_options.iter().enumerate() {
+                        let is_selected = selected_idx == Some(i);
+                        if ui.selectable_label(is_selected, model.as_str()).clicked() {
+                            selected_idx = Some(i);
+                        }
+                    }
+                });
+            if let Some(idx) = selected_idx {
+                a.model = model_options[idx].clone();
+            }
             ui.add_sized(
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("variant").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut a.variant).desired_width(120.0));
+            let variant_options = ["", "low", "medium", "high", "xhigh", "max", "ultra"];
+            let current_variant = a.variant.clone();
+            let mut selected_variant = variant_options.iter().position(|v| *v == current_variant.as_str());
+            egui::ComboBox::from_id_salt(format!("agent_variant_{}", a.key))
+                .selected_text(if current_variant.is_empty() {
+                    "选择..."
+                } else {
+                    &current_variant
+                })
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    for (i, v) in variant_options.iter().enumerate() {
+                        let label = if v.is_empty() { "(空)" } else { v };
+                        let is_selected = selected_variant == Some(i);
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            selected_variant = Some(i);
+                        }
+                    }
+                });
+            if let Some(idx) = selected_variant {
+                a.variant = variant_options[idx].to_string();
+            }
         });
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -281,7 +367,7 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("system").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut a.system).desired_width(560.0));
+            ui.add(egui::TextEdit::singleline(&mut a.system).desired_width(450.0));
         });
         if a.key != prev_key || a.description != prev_desc || a.model != prev_model || a.mode != prev_mode {
             a.refresh_haystack();
@@ -292,28 +378,89 @@ impl App {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
-                ui.add(egui::TextEdit::singleline(&mut self.new_agent.key).desired_width(120.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_agent.key)
+                        .hint_text("coding-assistant")
+                        .desired_width(120.0),
+                );
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("mode").weak()));
-                ui.add(egui::TextEdit::singleline(&mut self.new_agent.mode).desired_width(120.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_agent.mode)
+                        .hint_text("subagent")
+                        .desired_width(120.0),
+                );
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("description").weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.description)
-                        .desired_width(560.0),
+                        .hint_text("简要描述此 agent 的用途")
+                        .desired_width(450.0),
                 );
             });
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("model").weak()));
-                ui.add(egui::TextEdit::singleline(&mut self.new_agent.model).desired_width(120.0));
+                let mut model_options: Vec<String> = self
+                    .providers
+                    .iter()
+                    .flat_map(|p| p.models.iter().map(|m| format!("{}/{}", p.key, m.id)))
+                    .collect();
+                model_options.extend_from_slice(&[
+                    "opencode/mimo-v2.5-free".into(),
+                    "opencode/deepseek-v4-flash-free".into(),
+                ]);
+                model_options.sort();
+                model_options.dedup();
+                let current = self.new_agent.model.clone();
+                let mut selected_idx = model_options.iter().position(|m| m == &current);
+                let _response = egui::ComboBox::from_id_salt("new_agent_model")
+                    .selected_text(if current.is_empty() {
+                        "选择模型..."
+                    } else {
+                        &current
+                    })
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for (i, model) in model_options.iter().enumerate() {
+                            let is_selected = selected_idx == Some(i);
+                            if ui
+                                .selectable_label(is_selected, model.as_str())
+                                .clicked()
+                            {
+                                selected_idx = Some(i);
+                            }
+                        }
+                    });
+                if let Some(idx) = selected_idx {
+                    self.new_agent.model = model_options[idx].clone();
+                }
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("variant").weak()),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_agent.variant).desired_width(120.0),
-                );
+                let variant_options = ["", "low", "medium", "high", "xhigh", "max", "ultra"];
+                let current_variant = self.new_agent.variant.clone();
+                let mut selected_variant = variant_options.iter().position(|v| *v == current_variant.as_str());
+                egui::ComboBox::from_id_salt("new_agent_variant")
+                    .selected_text(if current_variant.is_empty() {
+                        "选择..."
+                    } else {
+                        &current_variant
+                    })
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for (i, v) in variant_options.iter().enumerate() {
+                            let label = if v.is_empty() { "(空)" } else { v };
+                            let is_selected = selected_variant == Some(i);
+                            if ui.selectable_label(is_selected, label).clicked() {
+                                selected_variant = Some(i);
+                            }
+                        }
+                    });
+                if let Some(idx) = selected_variant {
+                    self.new_agent.variant = variant_options[idx].to_string();
+                }
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -322,36 +469,45 @@ impl App {
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.temperature)
+                        .hint_text("0.7")
                         .desired_width(120.0),
                 );
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("color").weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut self.new_agent.color).desired_width(120.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_agent.color)
+                        .hint_text("#00ccff")
+                        .desired_width(120.0),
+                );
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("system").weak()),
                 );
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.new_agent.system).desired_width(560.0),
+                    egui::TextEdit::singleline(&mut self.new_agent.system)
+                        .hint_text("系统提示词")
+                        .desired_width(450.0),
                 );
             });
             ui.horizontal(|ui| {
                 ui.add_space(60.0);
-                if ui.button("添加 Agent").clicked() {
+                if ui.button("确认").clicked() {
                     if !self.new_agent.key.trim().is_empty() {
                         let mut na = self.new_agent.clone();
-                        if na.mode.is_empty() {
-                            na.mode = "subagent".into();
-                        }
                         na.refresh_haystack();
                         self.agents.push(na);
                         self.new_agent = AgentRow::new();
+                        self.show_new_agent = false;
                         self.status = "已添加 agent".into();
                     } else {
                         self.status = "请填写 agent key".into();
                     }
+                }
+                if ui.button("取消").clicked() {
+                    self.new_agent = AgentRow::new();
+                    self.show_new_agent = false;
                 }
             });
         });
@@ -377,10 +533,15 @@ impl App {
             })
             .collect();
 
+        if self.providers.is_empty() && !self.show_new_provider {
+            self.show_new_provider = true;
+        }
+
         let mut to_remove: Option<usize> = None;
         let mut to_copy: Option<usize> = None;
+        let mut hover_target: Option<String> = None;
         card_grid(ui, &matched, 1, 0.0, |ui, idx| {
-            self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &f);
+            self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &f, &mut hover_target);
         });
         if let Some(idx) = to_remove {
             self.providers.remove(idx);
@@ -392,6 +553,11 @@ impl App {
             p.refresh_haystack();
             self.providers.push(p);
             self.status = "已复制 provider".into();
+        }
+        if self.provider_drag_src.is_some() {
+            self.provider_drag_target = hover_target;
+        } else {
+            self.provider_drag_target = None;
         }
 
         ui.add_space(10.0);
@@ -410,17 +576,36 @@ impl App {
         to_remove: &mut Option<usize>,
         to_copy: &mut Option<usize>,
         _filter: &str,
+        hover_target: &mut Option<String>,
     ) {
         let key = self.providers[idx].key.clone();
         let open = self.provider_open.contains(&key);
-        let resp = card_frame(ui, open, |ui| {
+        let highlight = if self.provider_drag_target.as_deref() == Some(key.as_str()) {
+            2
+        } else if self.provider_drag_src.as_deref() == Some(key.as_str()) {
+            1
+        } else {
+            0
+        };
+        let resp = card_frame(ui, open, highlight, |ui| {
             ui.horizontal(|ui| {
                 let h = ui.add(DragHandle);
                 if h.drag_started() {
-                    self.provider_drag_src = Some(idx);
+                    self.provider_drag_src = Some(key.clone());
+                    self.provider_drag_target = None;
                 }
                 if h.drag_stopped() {
+                    if self.provider_drag_src == Some(key.clone()) {
+                        if let Some(dst) = self.provider_drag_target.clone() {
+                            let s = self.providers.iter().position(|p| p.key == key);
+                            let d = self.providers.iter().position(|p| p.key == dst);
+                            if let (Some(s), Some(d)) = (s, d) {
+                                move_item(&mut self.providers, s, d);
+                            }
+                        }
+                    }
                     self.provider_drag_src = None;
+                    self.provider_drag_target = None;
                 }
                 if ui
                     .add(
@@ -451,10 +636,9 @@ impl App {
                 self.render_provider_form(ui, idx);
             }
         });
-        if let Some(src) = self.provider_drag_src {
-            if resp.hovered() && src != idx {
-                move_item(&mut self.providers, src, idx);
-                self.provider_drag_src = Some(idx);
+        if let Some(src_key) = &self.provider_drag_src {
+            if src_key != &key && resp.contains_pointer() && hover_target.is_none() {
+                *hover_target = Some(key.clone());
             }
         }
     }
@@ -468,21 +652,47 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("description").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut p.description).desired_width(560.0));
+            ui.add(egui::TextEdit::singleline(&mut p.description).desired_width(450.0));
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
-            ui.add(egui::TextEdit::singleline(&mut p.npm).desired_width(120.0));
+            let npm_options = [
+                "",
+                "@ai-sdk/openai",
+                "@ai-sdk/anthropic",
+                "@ai-sdk/openai-compatible",
+            ];
+            let current_npm = p.npm.clone();
+            let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
+            egui::ComboBox::from_id_salt(format!("provider_npm_{}", p.key))
+                .selected_text(if current_npm.is_empty() {
+                    "选择 npm 包..."
+                } else {
+                    &current_npm
+                })
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for (i, npm) in npm_options.iter().enumerate() {
+                        let is_selected = selected_npm == Some(i);
+                        let label = if npm.is_empty() { "(空)" } else { *npm };
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            selected_npm = Some(i);
+                        }
+                    }
+                });
+            if let Some(idx) = selected_npm {
+                p.npm = npm_options[idx].to_string();
+            }
         });
         ui.horizontal(|ui| {
             ui.add_sized(
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("baseURL").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(192.0));
+            ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(200.0));
             ui.add_sized(
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("apiKey").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(373.0));
+            ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(350.0));
             ui.add_sized(
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("timeout").weak()),
@@ -514,9 +724,11 @@ impl App {
                     egui::Label::new(egui::RichText::new("output:").weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.models[j].output).desired_width(53.0));
+            });
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("mod.input:").weak()),
+                    egui::Label::new(egui::RichText::new("modalities.input:").weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut p.models[j].modalities_input)
@@ -524,12 +736,58 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("mod.output:").weak()),
+                    egui::Label::new(egui::RichText::new("modalities.output:").weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut p.models[j].modalities_output)
                         .desired_width(80.0),
                 );
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("variants:").weak()),
+                );
+                let variant_names = [
+                    "none", "low", "medium", "high", "xhigh", "max", "ultra",
+                ];
+                let current_variants = p.models[j].variants.clone();
+                let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    current_variants
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                let display = if selected_variants.is_empty() {
+                    "选择..."
+                } else {
+                    &current_variants
+                };
+                let variant_key = format!("variant_open_{}_{}", p.key, j);
+                let is_open = self.variant_open.contains(&variant_key);
+                if ui.button(display).clicked() {
+                    if is_open {
+                        self.variant_open.remove(&variant_key);
+                    } else {
+                        self.variant_open.insert(variant_key.clone());
+                    }
+                }
+                if is_open {
+                    for vn in &variant_names {
+                        let mut checked = selected_variants.contains(&vn.to_string());
+                        if ui.checkbox(&mut checked, *vn).changed() {
+                            if checked {
+                                if !selected_variants.contains(&vn.to_string()) {
+                                    selected_variants.push(vn.to_string());
+                                }
+                            } else {
+                                selected_variants.retain(|s| s != vn);
+                            }
+                            p.models[j].variants = selected_variants.join(", ");
+                        }
+                    }
+                }
                 if ui.button("删").clicked() {
                     rm = Some(j);
                 }
@@ -539,16 +797,113 @@ impl App {
             p.models.remove(j);
         }
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.label("model id:");
-            ui.add(egui::TextEdit::singleline(&mut p.new_model.id).desired_width(120.0));
-            if ui.button("添加 Model").clicked() {
-                if !p.new_model.id.trim().is_empty() {
-                    p.models.push(p.new_model.clone());
-                    p.new_model = ModelRow::new();
-                }
+        let show_new_model_key = format!("show_new_model_{}", p.key);
+        let show_new_model = self.variant_open.contains(&show_new_model_key);
+        let btn_text = if show_new_model { "收起" } else { "添加 Model" };
+        if ui.add_sized([120.0, 20.0], egui::Button::new(btn_text)).clicked() {
+            if show_new_model {
+                self.variant_open.remove(&show_new_model_key);
+            } else {
+                self.variant_open.insert(show_new_model_key.clone());
             }
-        });
+        }
+        if show_new_model {
+            ui.horizontal(|ui| {
+                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
+                ui.add(egui::TextEdit::singleline(&mut p.new_model.id).desired_width(120.0));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("name:").weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.new_model.name).desired_width(120.0));
+                ui.checkbox(&mut p.new_model.reasoning, "reasoning");
+                ui.checkbox(&mut p.new_model.tool_call, "tool_call");
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("context:").weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.new_model.context).desired_width(53.0));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("output:").weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.new_model.output).desired_width(53.0));
+            });
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("modalities.input:").weak()),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut p.new_model.modalities_input)
+                        .desired_width(80.0),
+                );
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("modalities.output:").weak()),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut p.new_model.modalities_output)
+                        .desired_width(80.0),
+                );
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("variants:").weak()),
+                );
+                let variant_names = [
+                    "none", "low", "medium", "high", "xhigh", "max", "ultra",
+                ];
+                let current_variants = p.new_model.variants.clone();
+                let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    current_variants
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                let display = if selected_variants.is_empty() {
+                    "选择..."
+                } else {
+                    &current_variants
+                };
+                let variant_key = format!("new_model_variant_{}", p.key);
+                let is_open = self.variant_open.contains(&variant_key);
+                if ui.button(display).clicked() {
+                    if is_open {
+                        self.variant_open.remove(&variant_key);
+                    } else {
+                        self.variant_open.insert(variant_key.clone());
+                    }
+                }
+                if is_open {
+                    for vn in &variant_names {
+                        let mut checked = selected_variants.contains(&vn.to_string());
+                        if ui.checkbox(&mut checked, *vn).changed() {
+                            if checked {
+                                if !selected_variants.contains(&vn.to_string()) {
+                                    selected_variants.push(vn.to_string());
+                                }
+                            } else {
+                                selected_variants.retain(|s| s != vn);
+                            }
+                            p.new_model.variants = selected_variants.join(", ");
+                        }
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(60.0);
+                if ui.button("添加").clicked() {
+                    if !p.new_model.id.trim().is_empty() {
+                        p.models.push(p.new_model.clone());
+                        p.new_model = ModelRow::new();
+                        self.variant_open.remove(&show_new_model_key);
+                    }
+                }
+            });
+        }
     }
 
     fn ui_new_provider_form(&mut self, ui: &mut egui::Ui) {
@@ -556,7 +911,9 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.new_provider.key).desired_width(120.0),
+                    egui::TextEdit::singleline(&mut self.new_provider.key)
+                        .hint_text("openai")
+                        .desired_width(120.0),
                 );
                 ui.add_sized(
                     [60.0, 24.0],
@@ -564,12 +921,36 @@ impl App {
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.description)
-                        .desired_width(560.0),
+                        .hint_text("简要描述此 provider")
+                        .desired_width(450.0),
                 );
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_provider.npm).desired_width(120.0),
-                );
+                let npm_options = [
+                    "",
+                    "@ai-sdk/openai",
+                    "@ai-sdk/anthropic",
+                    "@ai-sdk/openai-compatible",
+                ];
+                let current_npm = self.new_provider.npm.clone();
+                let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
+                egui::ComboBox::from_id_salt("new_provider_npm")
+                    .selected_text(if current_npm.is_empty() {
+                        "选择 npm 包..."
+                    } else {
+                        &current_npm
+                    })
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (i, npm) in npm_options.iter().enumerate() {
+                            let is_selected = selected_npm == Some(i);
+                            if ui.selectable_label(is_selected, *npm).clicked() {
+                                selected_npm = Some(i);
+                            }
+                        }
+                    });
+                if let Some(idx) = selected_npm {
+                    self.new_provider.npm = npm_options[idx].to_string();
+                }
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -578,7 +959,8 @@ impl App {
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.base_url)
-                        .desired_width(192.0),
+                        .hint_text("https://api.openai.com/v1")
+                        .desired_width(200.0),
                 );
                 ui.add_sized(
                     [60.0, 24.0],
@@ -586,7 +968,8 @@ impl App {
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.api_key)
-                        .desired_width(373.0),
+                        .hint_text("sk-xxx")
+                        .desired_width(408.0),
                 );
                 ui.add_sized(
                     [60.0, 24.0],
@@ -594,21 +977,142 @@ impl App {
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.timeout)
+                        .hint_text("180000")
                         .desired_width(53.0),
                 );
             });
+            ui.add_space(2.0);
+            ui.strong("Models");
+            let mut rm_new: Option<usize> = None;
+            for j in 0..self.new_provider.models.len() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].id).desired_width(120.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("name:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].name).desired_width(120.0));
+                    ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
+                    ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("context:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].context).desired_width(53.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("output:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].output).desired_width(53.0));
+                    if ui.button("删").clicked() {
+                        rm_new = Some(j);
+                    }
+                });
+            }
+            if let Some(j) = rm_new {
+                self.new_provider.models.remove(j);
+            }
+            ui.add_space(2.0);
+            let show_new_model_key = format!("new_provider_show_model_{}", self.new_provider.key);
+            let show_new_model = self.variant_open.contains(&show_new_model_key);
+            if ui.button(if show_new_model { "收起" } else { "添加 Model" }).clicked() {
+                if show_new_model {
+                    self.variant_open.remove(&show_new_model_key);
+                } else {
+                    self.variant_open.insert(show_new_model_key.clone());
+                }
+            }
+            if show_new_model {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.id).desired_width(120.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("name:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.name).desired_width(120.0));
+                    ui.checkbox(&mut self.new_provider.new_model.reasoning, "reasoning");
+                    ui.checkbox(&mut self.new_provider.new_model.tool_call, "tool_call");
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("context:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.context).desired_width(53.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("output:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.output).desired_width(53.0));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("modalities.input:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_input).desired_width(80.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("modalities.output:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_output).desired_width(80.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("variants:").weak()),
+                    );
+                    let variant_names = [
+                        "none", "low", "medium", "high", "xhigh", "max", "ultra",
+                    ];
+                    let current_variants = self.new_provider.new_model.variants.clone();
+                    let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        current_variants.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                    };
+                    let display = if selected_variants.is_empty() { "选择..." } else { &current_variants };
+                    if ui.button(display).clicked() {}
+                    for vn in &variant_names {
+                        let mut checked = selected_variants.contains(&vn.to_string());
+                        if ui.checkbox(&mut checked, *vn).changed() {
+                            if checked {
+                                if !selected_variants.contains(&vn.to_string()) {
+                                    selected_variants.push(vn.to_string());
+                                }
+                            } else {
+                                selected_variants.retain(|s| s != vn);
+                            }
+                            self.new_provider.new_model.variants = selected_variants.join(", ");
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(60.0);
+                    if ui.button("添加").clicked() {
+                        if !self.new_provider.new_model.id.trim().is_empty() {
+                            self.new_provider.models.push(self.new_provider.new_model.clone());
+                            self.new_provider.new_model = ModelRow::new();
+                            self.variant_open.remove(&show_new_model_key);
+                        }
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 ui.add_space(60.0);
-                if ui.button("添加 Provider").clicked() {
+                if ui.button("确认").clicked() {
                     if !self.new_provider.key.trim().is_empty() {
                         let mut np = self.new_provider.clone();
                         np.refresh_haystack();
                         self.providers.push(np);
                         self.new_provider = ProviderRow::new();
+                        self.show_new_provider = false;
                         self.status = "已添加 provider".into();
                     } else {
                         self.status = "请填写 provider key".into();
                     }
+                }
+                if ui.button("取消").clicked() {
+                    self.new_provider = ProviderRow::new();
+                    self.show_new_provider = false;
                 }
             });
         });
@@ -629,10 +1133,18 @@ impl App {
     }
 
     fn paint_drag_ghost(&self, ctx: &egui::Context) {
-        let label = if let Some(idx) = self.agent_drag_src {
-            self.agents.get(idx).map(|a| a.key.as_str()).unwrap_or("")
-        } else if let Some(idx) = self.provider_drag_src {
-            self.providers.get(idx).map(|p| p.key.as_str()).unwrap_or("")
+        let label = if let Some(k) = &self.agent_drag_src {
+            self.agents
+                .iter()
+                .find(|a| &a.key == k)
+                .map(|a| a.key.as_str())
+                .unwrap_or("")
+        } else if let Some(k) = &self.provider_drag_src {
+            self.providers
+                .iter()
+                .find(|p| &p.key == k)
+                .map(|p| p.key.as_str())
+                .unwrap_or("")
         } else {
             return;
         };
@@ -657,7 +1169,7 @@ impl App {
         );
         let label_w = galley.size().x;
         let size = egui::vec2(label_w + 24.0, 30.0);
-        let ghost_rect = egui::Rect::from_min_size(pointer + egui::vec2(14.0, 14.0), size);
+        let ghost_rect = egui::Rect::from_min_size(pointer + egui::vec2(20.0, -15.0), size);
         painter.rect_filled(ghost_rect, 8.0, bg);
         painter.rect_stroke(
             ghost_rect,
