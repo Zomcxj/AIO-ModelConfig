@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use opencode_model_config::app::App;
+use opencode_model_config::theme::{Radius, Theme};
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon_rgba.bin");
 const ICON_W: u32 = 256;
@@ -19,7 +20,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_fonts(build_cjk_fonts());
-            cc.egui_ctx.set_style(build_style());
+            Theme::default().apply(&cc.egui_ctx, Radius::default());
             #[cfg(target_os = "windows")]
             {
                 use raw_window_handle::HasWindowHandle;
@@ -55,22 +56,4 @@ fn build_cjk_fonts() -> egui::FontDefinitions {
         }
     }
     fonts
-}
-
-fn build_style() -> egui::Style {
-    let mut style = egui::Style::default();
-    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-    style.spacing.button_padding = egui::vec2(14.0, 3.0);
-    style.spacing.interact_size.y = 18.0;
-    style.spacing.scroll.bar_outer_margin = 0.0;
-    style.spacing.scroll.floating = true;
-    for w in [
-        &mut style.visuals.widgets.noninteractive,
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
-    ] {
-        w.corner_radius = 8.0.into();
-    }
-    style
 }

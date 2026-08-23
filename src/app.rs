@@ -1,4 +1,5 @@
 use crate::model::{AgentRow, ModelRow, ProviderRow};
+use crate::theme::{Radius, Theme};
 use crate::ui::{card_frame, card_grid, DragHandle, move_item};
 use crate::util::{
     default_config_path, ensure_parent_dir, is_wsl_path, read_wsl_file, show_file_dialog,
@@ -26,6 +27,8 @@ pub struct App {
     agent_drag_target: Option<String>,
     provider_drag_src: Option<String>,
     provider_drag_target: Option<String>,
+    theme: Theme,
+    radius: Radius,
 }
 
 impl Default for App {
@@ -52,6 +55,8 @@ impl Default for App {
             agent_drag_target: None,
             provider_drag_src: None,
             provider_drag_target: None,
+            theme: Theme::default(),
+            radius: Radius::default(),
         }
     }
 }
@@ -124,6 +129,49 @@ impl App {
                             self.providers.iter().map(|p| p.key.clone()).collect();
                     }
                 }
+                ui.separator();
+                ui.label("主题:");
+                let theme_btn = ui.button(self.theme.label());
+                let popup_id = ui.make_persistent_id("theme_popup");
+                if theme_btn.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(popup_id));
+                }
+                egui::popup_below_widget(
+                    ui,
+                    popup_id,
+                    &theme_btn,
+                    egui::PopupCloseBehavior::CloseOnClick,
+                    |ui| {
+                        ui.set_min_width(80.0);
+                        for t in Theme::ALL {
+                            if ui.selectable_label(self.theme == t, t.label()).clicked() {
+                                self.theme = t;
+                                t.apply(ctx, self.radius);
+                            }
+                        }
+                    },
+                );
+                ui.label("圆角:");
+                let radius_btn = ui.button(self.radius.label());
+                let radius_popup_id = ui.make_persistent_id("radius_popup");
+                if radius_btn.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(radius_popup_id));
+                }
+                egui::popup_below_widget(
+                    ui,
+                    radius_popup_id,
+                    &radius_btn,
+                    egui::PopupCloseBehavior::CloseOnClick,
+                    |ui| {
+                        ui.set_min_width(80.0);
+                        for r in Radius::ALL {
+                            if ui.selectable_label(self.radius == r, r.label()).clicked() {
+                                self.radius = r;
+                                self.theme.apply(ctx, r);
+                            }
+                        }
+                    },
+                );
             });
         });
     }
@@ -692,7 +740,7 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("apiKey").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(350.0));
+            ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
             ui.add_sized(
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("timeout").weak()),

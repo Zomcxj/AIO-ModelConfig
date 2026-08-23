@@ -6,7 +6,7 @@ pub fn card_frame<R>(
     highlight: u8,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::Response {
-    let r = 10.0;
+    let corner = ui.visuals().widgets.noninteractive.corner_radius;
     let fill = if open {
         ui.visuals().faint_bg_color
     } else {
@@ -19,7 +19,7 @@ pub fn card_frame<R>(
     };
     egui::Frame::NONE
         .fill(fill)
-        .corner_radius(egui::CornerRadius::same(r as u8))
+        .corner_radius(corner)
         .stroke(egui::Stroke::new(stroke_width, stroke_color))
         .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
