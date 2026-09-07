@@ -9,6 +9,22 @@ use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::fs;
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SaveFormat {
+    #[default]
+    Current,
+    Compact,
+}
+
+impl SaveFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Current => "当前格式",
+            Self::Compact => "压缩格式",
+        }
+    }
+}
+
 pub struct App {
     root: Value,
     agents: Vec<AgentRow>,
@@ -29,6 +45,7 @@ pub struct App {
     provider_drag_target: Option<String>,
     theme: Theme,
     radius: Radius,
+    save_format: SaveFormat,
 }
 
 impl Default for App {
@@ -57,6 +74,7 @@ impl Default for App {
             provider_drag_target: None,
             theme: Theme::default(),
             radius: Radius::default(),
+            save_format: SaveFormat::default(),
         }
     }
 }
@@ -176,11 +194,28 @@ impl App {
         });
     }
 
-    fn ui_status_bar(&self, ctx: &egui::Context) {
+    fn ui_status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 ui.label(egui::RichText::new(&self.status).weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("save_format")
+                        .selected_text(self.save_format.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.save_format,
+                                SaveFormat::Current,
+                                SaveFormat::Current.label(),
+                            );
+                            ui.selectable_value(
+                                &mut self.save_format,
+                                SaveFormat::Compact,
+                                SaveFormat::Compact.label(),
+                            );
+                        });
+                    ui.label("保存格式:");
+                });
             });
             ui.horizontal(|ui| {
                 ui.label(
@@ -352,7 +387,7 @@ impl App {
                 .collect();
             model_options.extend_from_slice(&[
                 "opencode/mimo-v2.5-free".into(),
-                "opencode/deepseek-v4-flash-free".into(),
+                "opencode/big-pickle".into(),
             ]);
             model_options.sort();
             model_options.dedup();
@@ -456,7 +491,7 @@ impl App {
                     .collect();
                 model_options.extend_from_slice(&[
                     "opencode/mimo-v2.5-free".into(),
-                    "opencode/deepseek-v4-flash-free".into(),
+                    "opencode/big-pickle".into(),
                 ]);
                 model_options.sort();
                 model_options.dedup();
@@ -1257,14 +1292,17 @@ impl App {
             }
             o.insert("provider".into(), Value::Object(pm));
         }
+
         let content = match serde_json::to_string_pretty(&root) {
-            Ok(s) => s,
+            Ok(content) if self.save_format == SaveFormat::Current => content,
+            Ok(_) => compact_json(&root),
             Err(e) => {
                 self.root = root;
                 self.status = format!("保存失败: 序列化错误 {}", e);
                 return;
             }
         };
+
         let write_res = if is_wsl_path(&self.config_path) {
             crate::util::write_wsl_file(&self.config_path, &content)
         } else {
@@ -1279,6 +1317,441 @@ impl App {
                 self.status = format!("保存失败: {}", e);
             }
         }
+    }
+}
+
+fn detect_indent(s: &str) -> String {
+    for line in s.lines().skip(1) {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('*') {
+            continue;
+        }
+        let leading = &line[..line.len() - trimmed.len()];
+        if leading.is_empty() {
+            continue;
+        }
+        if leading.contains('\t') {
+            return "\t".into();
+        }
+        return leading.to_string();
+    }
+    "  ".into()
+}
+
+fn edit_json_preserve(orig: &str, new_root: &Value, indent: &str) -> String {
+    let mut lines: Vec<String> = orig.lines().map(String::from).collect();
+    if let Some(obj) = new_root.as_object() {
+        for (key, val) in obj {
+            let pattern = format!("\"{}\"", key);
+            if let Some(start) = lines.iter().position(|l| l.contains(&pattern)) {
+                let end = find_block_end(&lines, start);
+                let new_block = format_value_compact(key, val, indent, &lines[start]);
+                let mut new_lines: Vec<String> = new_block.lines().map(String::from).collect();
+                let old_lines = &lines[start..end];
+                let had_trailing_comma = old_lines.last().map_or(false, |l| l.trim_end().ends_with(','));
+                let new_has_trailing_comma = new_lines.last().map_or(false, |l| l.trim_end().ends_with(','));
+                if had_trailing_comma && !new_has_trailing_comma {
+                    if let Some(last) = new_lines.last_mut() {
+                        last.push(',');
+                    }
+                } else if !had_trailing_comma && new_has_trailing_comma {
+                    if let Some(last) = new_lines.last_mut() {
+                        let trimmed = last.trim_end_matches(',');
+                        *last = trimmed.to_string();
+                    }
+                }
+                lines.splice(start..end, new_lines);
+            }
+        }
+    }
+    let mut result = lines.join("\n");
+    if orig.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+fn find_block_end(lines: &[String], start: usize) -> usize {
+    let key_line = &lines[start];
+    let has_open = key_line.contains('{') || key_line.contains('[');
+    if !has_open {
+        return (start + 1).min(lines.len());
+    }
+    let mut depth = 0i32;
+    for ch in key_line.chars() {
+        match ch {
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth <= 0 {
+        let mut end = start + 1;
+        if end < lines.len() && lines[end].trim().starts_with(',') {
+            end += 1;
+        }
+        return end;
+    }
+    for i in (start + 1)..lines.len() {
+        for ch in lines[i].chars() {
+            match ch {
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 {
+            let mut end = i + 1;
+            if end < lines.len() && lines[end].trim().starts_with(',') {
+                end += 1;
+            }
+            return end;
+        }
+    }
+    lines.len()
+}
+
+fn format_value_compact(key: &str, val: &Value, indent: &str, sample_line: &str) -> String {
+    let depth_indent = {
+        let trimmed = sample_line.trim_start();
+        &sample_line[..sample_line.len() - trimmed.len()]
+    };
+    let deeper = format!("{}{}", depth_indent, indent);
+
+    let mut out = String::new();
+    out.push_str(depth_indent);
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\": ");
+
+    match val {
+        Value::Object(o) => {
+            if o.is_empty() {
+                out.push_str("{}");
+                return out;
+            }
+            let entries: Vec<_> = o.iter().collect();
+            let mut single = out.clone();
+            single.push_str("{ ");
+            for (i, (k, v)) in entries.iter().enumerate() {
+                single.push('"');
+                single.push_str(k);
+                single.push_str("\": ");
+                single.push_str(&serde_json::to_string(v).unwrap_or_default());
+                if i + 1 < entries.len() {
+                    single.push_str(", ");
+                }
+            }
+            single.push_str(" }");
+            if single.len() <= 200 {
+                return single;
+            }
+            out.push('{');
+            for (i, (k, v)) in entries.iter().enumerate() {
+                out.push('\n');
+                out.push_str(&deeper);
+                out.push('"');
+                out.push_str(k);
+                out.push_str("\": ");
+                let val_str = compact_value(v, &deeper, indent);
+                out.push_str(&val_str);
+                if i + 1 < entries.len() {
+                    out.push(',');
+                }
+            }
+            out.push('\n');
+            out.push_str(depth_indent);
+            out.push('}');
+        }
+        Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter()
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .collect();
+            let mut single = out.clone();
+            single.push_str("[ ");
+            single.push_str(&parts.join(", "));
+            single.push_str(" ]");
+            if single.len() <= 200 {
+                return single;
+            }
+            out.push('[');
+            for (i, v) in arr.iter().enumerate() {
+                out.push('\n');
+                out.push_str(&deeper);
+                out.push_str(&serde_json::to_string(v).unwrap_or_default());
+                if i + 1 < arr.len() {
+                    out.push(',');
+                }
+            }
+            out.push('\n');
+            out.push_str(depth_indent);
+            out.push(']');
+        }
+        _ => {
+            out.push_str(&serde_json::to_string(val).unwrap_or_default());
+        }
+    }
+    out
+}
+
+fn compact_value(val: &Value, depth_indent: &str, indent: &str) -> String {
+    let deeper = format!("{}{}", depth_indent, indent);
+    match val {
+        Value::Object(o) => {
+            if o.is_empty() {
+                return "{}".into();
+            }
+            let entries: Vec<_> = o.iter().collect();
+            let mut single = String::from("{ ");
+            for (i, (k, v)) in entries.iter().enumerate() {
+                single.push('"');
+                single.push_str(k);
+                single.push_str("\": ");
+                single.push_str(&serde_json::to_string(v).unwrap_or_default());
+                if i + 1 < entries.len() {
+                    single.push_str(", ");
+                }
+            }
+            single.push_str(" }");
+            if single.len() <= 120 {
+                return single;
+            }
+            let mut out = String::from("{");
+            for (i, (k, v)) in entries.iter().enumerate() {
+                out.push('\n');
+                out.push_str(&deeper);
+                out.push('"');
+                out.push_str(k);
+                out.push_str("\": ");
+                out.push_str(&compact_value(v, &deeper, indent));
+                if i + 1 < entries.len() {
+                    out.push(',');
+                }
+            }
+            out.push('\n');
+            out.push_str(depth_indent);
+            out.push('}');
+            out
+        }
+        Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter()
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .collect();
+            let single = format!("[ {} ]", parts.join(", "));
+            if single.len() <= 120 {
+                return single;
+            }
+            let mut out = String::from("[");
+            for (i, v) in arr.iter().enumerate() {
+                out.push('\n');
+                out.push_str(&deeper);
+                out.push_str(&serde_json::to_string(v).unwrap_or_default());
+                if i + 1 < arr.len() {
+                    out.push(',');
+                }
+            }
+            out.push('\n');
+            out.push_str(depth_indent);
+            out.push(']');
+            out
+        }
+        _ => serde_json::to_string(val).unwrap_or_default(),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompactRole {
+    Normal,
+    AgentContainer,
+    ProviderContainer,
+    ProviderEntry,
+    ModelsContainer,
+    Target,
+}
+
+fn compact_json(root: &Value) -> String {
+    let mut lines = serialize_object(root.as_object().unwrap_or(&Map::new()), 0, CompactRole::Normal);
+    lines.push('\n');
+    lines
+}
+
+fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole) -> String {
+    if role == CompactRole::Target {
+        return serialize_target_object(object, level);
+    }
+
+    let indent = "  ".repeat(level);
+    let child_indent = "  ".repeat(level + 1);
+    let mut lines = vec![format!("{}{{", indent)];
+    for (index, (key, value)) in object.iter().enumerate() {
+        let child_role = match (role, key.as_str()) {
+            (CompactRole::Normal, "agent") => CompactRole::AgentContainer,
+            (CompactRole::Normal, "provider") => CompactRole::ProviderContainer,
+            (CompactRole::ProviderContainer, _) => CompactRole::ProviderEntry,
+            (CompactRole::ProviderEntry, "models") => CompactRole::ModelsContainer,
+            (CompactRole::AgentContainer, _) | (CompactRole::ModelsContainer, _) => {
+                CompactRole::Target
+            }
+            _ => CompactRole::Normal,
+        };
+        let mut value_lines = serialize_value(value, level + 1, child_role, false);
+        let prefix = format!("{}{}: ", child_indent, json_string(key));
+        let mut entry_lines: Vec<String> = value_lines
+            .drain(..)
+            .enumerate()
+            .map(|(i, line)| {
+                if i == 0 {
+                    format!("{}{}", prefix, line.trim_start())
+                } else {
+                    line
+                }
+            })
+            .collect();
+        if index + 1 < object.len() {
+            if let Some(last) = entry_lines.last_mut() {
+                last.push(',');
+            }
+        }
+        lines.extend(entry_lines);
+    }
+    lines.push(format!("{}}}", indent));
+    lines.join("\n")
+}
+
+fn serialize_value(
+    value: &Value,
+    level: usize,
+    role: CompactRole,
+    normalize_variants: bool,
+) -> Vec<String> {
+    match value {
+        Value::Object(object) => serialize_object(object, level, role)
+            .lines()
+            .map(String::from)
+            .collect(),
+        Value::Array(_) | Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => {
+            let text = if normalize_variants {
+                compact_json_value(value, true)
+            } else {
+                compact_json_value(value, false)
+            };
+            if text.contains('\n') {
+                text.lines().map(String::from).collect()
+            } else {
+                vec![text]
+            }
+        }
+    }
+}
+
+fn serialize_target_object(object: &Map<String, Value>, level: usize) -> String {
+    let indent = "  ".repeat(level);
+    let field_indent = "  ".repeat(level + 1);
+    let fields: Vec<String> = object
+        .iter()
+        .map(|(key, value)| {
+            let rendered = if key == "variants" {
+                compact_variants(value)
+            } else {
+                compact_json_value(value, false)
+            };
+            format!("{}: {}", json_string(key), rendered)
+        })
+        .collect();
+
+    let mut lines = vec!["{".into()];
+    let mut current = String::new();
+    for (index, field) in fields.iter().enumerate() {
+        let candidate = if current.is_empty() {
+            field.clone()
+        } else {
+            format!("{}, {}", current, field)
+        };
+        current = candidate;
+        if current.chars().count() + field_indent.chars().count() > 80 {
+            let comma = if index + 1 < fields.len() { "," } else { "" };
+            lines.push(format!("{}{}{}", field_indent, current, comma));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(format!("{}{}", field_indent, current));
+    }
+    lines.push(format!("{}}}", indent));
+    lines.join("\n")
+}
+
+fn compact_json_value(value: &Value, pretty_array: bool) -> String {
+    if pretty_array {
+        serde_json::to_string(value).unwrap_or_else(|_| "null".into())
+    } else {
+        serde_json::to_string(value).unwrap_or_else(|_| "null".into())
+    }
+}
+
+fn compact_variants(value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return compact_json_value(value, false);
+    };
+    let entries: Vec<String> = object
+        .keys()
+        .map(|key| format!("{}: {{}}", json_string(key)))
+        .collect();
+    format!("{{ {} }}", entries.join(", "))
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    #[test]
+    fn compact_variants_use_empty_objects() {
+        let value = serde_json::json!({
+            "variants": {
+                "medium": { "reasoningEffort": "medium" },
+                "high": { "reasoningEffort": "high" }
+            }
+        });
+        let output = serialize_target_object(value.as_object().unwrap(), 0);
+        assert!(output.contains("\"variants\": { \"medium\": {}, \"high\": {} }"));
+        assert!(!output.contains("reasoningEffort"));
+    }
+
+    #[test]
+    fn compact_targets_agent_fields_only() {
+        let root = serde_json::json!({
+            "agent": { "writer": { "mode": "subagent", "description": "text", "model": "p/m" } },
+            "other": { "a": 1, "b": 2 }
+        });
+        let output = compact_json(&root);
+        assert!(output.contains("\"writer\": {"));
+        assert!(output.contains("\"mode\": \"subagent\", \"description\": \"text\""));
+        assert!(output.contains("\"other\": {\n    \"a\": 1,"));
+    }
+
+    #[test]
+    fn compact_targets_provider_model_fields() {
+        let root = serde_json::json!({
+            "provider": {
+                "p": {
+                    "models": {
+                        "m": {
+                            "name": "Model",
+                            "reasoning": true,
+                            "variants": { "medium": {}, "high": {} }
+                        }
+                    }
+                }
+            }
+        });
+        let output = compact_json(&root);
+        assert!(output.contains("\"m\": {"));
+        assert!(output.contains("\"name\": \"Model\", \"reasoning\": true"));
+        assert!(output.contains("\"variants\": { \"medium\": {}, \"high\": {} }"));
     }
 }
 
