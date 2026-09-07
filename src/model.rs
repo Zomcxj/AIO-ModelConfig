@@ -195,9 +195,7 @@ impl ModelRow {
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(|v| {
-                    let mut settings = Map::new();
-                    settings.insert("reasoningEffort".into(), Value::String(v.to_string()));
-                    (v.to_string(), Value::Object(settings))
+                    (v.to_string(), Value::Object(Map::new()))
                 })
                 .collect();
             if !variants_map.is_empty() {
