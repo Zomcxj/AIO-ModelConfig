@@ -21,16 +21,22 @@ pub fn api_to_npm(api: &str) -> String {
 pub fn model_from_pi(v: &Value) -> ModelRow {
     let id = str_at(v, "id").to_string();
     let modalities_input = nested_list_str(v, &["input"]);
+    let thinking_level_map = v
+        .get("thinkingLevelMap")
+        .and_then(|m| m.as_object())
+        .map(|obj| obj.values().map(|val| val.as_str().unwrap_or("")).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
     ModelRow {
         id: id.clone(),
         name: str_at(v, "name").to_string(),
         reasoning: bool_at(v, "reasoning"),
         tool_call: true,
+        store: false,
         context: num_at(v, "contextWindow"),
         output: num_at(v, "maxTokens"),
         modalities_input,
         modalities_output: "text".to_string(),
-        variants: String::new(),
+        variants: thinking_level_map,
         raw: v.clone(),
     }
 }
@@ -56,6 +62,18 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
     if let Ok(out) = m.output.parse::<i64>() {
         obj.insert("maxTokens".into(), Value::Number(out.into()));
     }
+    if !m.variants.trim().is_empty() {
+        let thinking_map: Map<String, Value> = m
+            .variants
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|v| (v.to_string(), Value::String(v.to_string())))
+            .collect();
+        if !thinking_map.is_empty() {
+            obj.insert("thinkingLevelMap".into(), Value::Object(thinking_map));
+        }
+    }
     Value::Object(obj)
 }
 
@@ -77,8 +95,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         .get("compat")
         .and_then(|c| c.get("supportsDeveloperRole"))
         .and_then(|v| v.as_bool())
-        .map(|b| b.to_string())
-        .unwrap_or_default();
+        .unwrap_or(true);
     let mut r = ProviderRow {
         key: key.to_string(),
         description: String::new(),
@@ -98,7 +115,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
     let mut obj = Map::new();
-    if p.compat == "false" {
+    if !p.compat {
         obj.insert(
             "compat".into(),
             serde_json::json!({"supportsDeveloperRole": false}),

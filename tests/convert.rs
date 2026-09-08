@@ -182,7 +182,7 @@ fn provider_to_pi_preserves_compat() {
         "models": []
     });
     let provider = convert::provider_from_pi("openai", &v);
-    assert_eq!(provider.compat, "false");
+    assert!(!provider.compat);
     let output = convert::provider_to_pi(&provider);
     assert_eq!(output["compat"]["supportsDeveloperRole"], false);
 }
@@ -199,7 +199,7 @@ fn provider_to_pi_omits_compat_when_true() {
         "models": []
     });
     let provider = convert::provider_from_pi("openai", &v);
-    assert_eq!(provider.compat, "true");
+    assert!(provider.compat);
     let output = convert::provider_to_pi(&provider);
     assert!(output.get("compat").is_none(), "compat should be omitted when true");
 }
@@ -213,7 +213,7 @@ fn provider_to_pi_omits_compat_when_empty() {
         "models": []
     });
     let provider = convert::provider_from_pi("openai", &v);
-    assert_eq!(provider.compat, "");
+    assert!(provider.compat);
     let output = convert::provider_to_pi(&provider);
     assert!(output.get("compat").is_none(), "compat should be omitted when not present");
 }

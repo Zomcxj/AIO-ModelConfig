@@ -94,6 +94,7 @@ pub struct ModelRow {
     pub name: String,
     pub reasoning: bool,
     pub tool_call: bool,
+    pub store: bool,
     pub context: String,
     pub output: String,
     pub modalities_input: String,
@@ -114,11 +115,17 @@ impl ModelRow {
                 }
             })
             .unwrap_or_default();
+        let store = v
+            .get("options")
+            .and_then(|o| o.get("store"))
+            .and_then(|s| s.as_bool())
+            .unwrap_or(false);
         Self {
             id: id.to_string(),
             name: str_at(v, "name").to_string(),
             reasoning: bool_at(v, "reasoning"),
             tool_call: bool_at(v, "tool_call"),
+            store,
             context: nested_num(v, &["limit", "context"]),
             output: nested_num(v, &["limit", "output"]),
             modalities_input: nested_list_str(v, &["modalities", "input"]),
@@ -134,6 +141,7 @@ impl ModelRow {
             name: String::new(),
             reasoning: false,
             tool_call: false,
+            store: false,
             context: String::new(),
             output: String::new(),
             modalities_input: String::new(),
@@ -152,6 +160,13 @@ impl ModelRow {
         }
         m.insert("reasoning".into(), self.reasoning.into());
         m.insert("tool_call".into(), self.tool_call.into());
+        let mut options = m
+            .get("options")
+            .and_then(|o| o.as_object())
+            .cloned()
+            .unwrap_or_default();
+        options.insert("store".into(), self.store.into());
+        m.insert("options".into(), Value::Object(options));
         let mut limit = m
             .get("limit")
             .and_then(|l| l.as_object())
@@ -216,7 +231,7 @@ pub struct ProviderRow {
     pub base_url: String,
     pub api_key: String,
     pub timeout: String,
-    pub compat: String,
+    pub compat: bool,
     pub models: Vec<ModelRow>,
     pub new_model: ModelRow,
     pub raw: Value,
@@ -230,6 +245,11 @@ impl ProviderRow {
             .and_then(|x| x.as_object())
             .map(|o| o.iter().map(|(k, mv)| ModelRow::from(k, mv)).collect())
             .unwrap_or_default();
+        let compat = v
+            .get("compat")
+            .and_then(|c| c.get("supportsDeveloperRole"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let mut r = Self {
             key: key.to_string(),
             description: str_at(v, "description").to_string(),
@@ -237,7 +257,7 @@ impl ProviderRow {
             base_url: nested_str(v, &["options", "baseURL"]).to_string(),
             api_key: nested_str(v, &["options", "apiKey"]).to_string(),
             timeout: nested_num(v, &["options", "timeout"]),
-            compat: v.get("compat").map(|c| c.to_string()).unwrap_or_default(),
+            compat,
             models,
             new_model: ModelRow::new(),
             raw: v.clone(),
@@ -255,7 +275,7 @@ impl ProviderRow {
             base_url: String::new(),
             api_key: String::new(),
             timeout: String::new(),
-            compat: String::new(),
+            compat: true,
             models: Vec::new(),
             new_model: ModelRow::new(),
             raw: Value::Object(Map::new()),

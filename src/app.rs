@@ -875,25 +875,7 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("compat").weak()),
             );
-            let compat_options = ["", "false", "true"];
-            let compat_labels = ["无", "false (写入)", "true (省略)"];
-            let current_idx = match p.compat.as_str() {
-                "false" => 1,
-                "true" => 2,
-                _ => 0,
-            };
-            let mut selected = current_idx;
-            egui::ComboBox::from_id_salt(format!("compat_{}", p.key))
-                .selected_text(compat_labels[current_idx])
-                .width(110.0)
-                .show_ui(ui, |ui| {
-                    for (i, label) in compat_labels.iter().enumerate() {
-                        if ui.selectable_label(selected == i, *label).clicked() {
-                            selected = i;
-                        }
-                    }
-                });
-            p.compat = compat_options[selected].to_string();
+            ui.checkbox(&mut p.compat, "supportsDeveloperRole");
         });
 
         ui.add_space(2.0);
@@ -910,6 +892,7 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0));
                 ui.checkbox(&mut p.models[j].reasoning, "reasoning");
                 ui.checkbox(&mut p.models[j].tool_call, "tool_call");
+                ui.checkbox(&mut p.models[j].store, "store");
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("context:").weak()),
@@ -1014,6 +997,7 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.name).desired_width(120.0));
                 ui.checkbox(&mut p.new_model.reasoning, "reasoning");
                 ui.checkbox(&mut p.new_model.tool_call, "tool_call");
+                ui.checkbox(&mut p.new_model.store, "store");
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("context:").weak()),
@@ -1191,6 +1175,7 @@ impl App {
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].name).desired_width(120.0));
                     ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
                     ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
+                    ui.checkbox(&mut self.new_provider.models[j].store, "store");
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("context:").weak()),
@@ -1230,6 +1215,7 @@ impl App {
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.name).desired_width(120.0));
                     ui.checkbox(&mut self.new_provider.new_model.reasoning, "reasoning");
                     ui.checkbox(&mut self.new_provider.new_model.tool_call, "tool_call");
+                    ui.checkbox(&mut self.new_provider.new_model.store, "store");
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("context:").weak()),
