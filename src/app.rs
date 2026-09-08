@@ -51,6 +51,8 @@ pub struct App {
     save_opencode: bool,
     save_pi_agent: bool,
     provider_view_opencode: bool,
+    show_agents_section: bool,
+    show_providers_section: bool,
     pi_extras: Value,
 }
 
@@ -107,6 +109,8 @@ impl Default for App {
             save_opencode: false,
             save_pi_agent: false,
             provider_view_opencode: format == ConfigFormat::Opencode,
+            show_agents_section: true,
+            show_providers_section: true,
             pi_extras,
         }
     }
@@ -242,26 +246,6 @@ impl App {
                     self.filter.clear();
                 }
                 ui.separator();
-                let all_open = self
-                    .agents
-                    .iter()
-                    .all(|a| self.agent_open.contains(&a.key))
-                    && self
-                        .providers
-                        .iter()
-                        .all(|p| self.provider_open.contains(&p.key));
-                let btn_label = if all_open { "隐藏全部" } else { "展开全部" };
-                if ui.button(btn_label).clicked() {
-                    if all_open {
-                        self.agent_open.clear();
-                        self.provider_open.clear();
-                    } else {
-                        self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
-                        self.provider_open =
-                            self.providers.iter().map(|p| p.key.clone()).collect();
-                    }
-                }
-                ui.separator();
                 ui.label(
                     egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
                 );
@@ -290,8 +274,16 @@ impl App {
     fn ui_agents_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Agents");
+            let btn_label = if self.show_agents_section { "隐藏" } else { "展开" };
+            if ui.button(btn_label).clicked() {
+                self.show_agents_section = !self.show_agents_section;
+            }
         });
         ui.separator();
+
+        if !self.show_agents_section {
+            return;
+        }
 
         let f = self.filter.to_lowercase();
         let matched: Vec<usize> = self
@@ -655,6 +647,10 @@ impl App {
     fn ui_providers_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Providers");
+            let btn_label = if self.show_providers_section { "隐藏" } else { "展开" };
+            if ui.button(btn_label).clicked() {
+                self.show_providers_section = !self.show_providers_section;
+            }
             let oc_label = if self.provider_view_opencode { "opencode" } else { "pi-agent" };
             let oc_color = if self.provider_view_opencode {
                 egui::Color32::from_rgb(100, 200, 100)
@@ -666,6 +662,10 @@ impl App {
             }
         });
         ui.separator();
+
+        if !self.show_providers_section {
+            return;
+        }
 
         let f = self.filter.to_lowercase();
         let matched: Vec<usize> = self
@@ -796,8 +796,7 @@ impl App {
         let show_oc = self.provider_view_opencode;
         let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
         let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
-        let timeout_label = if show_oc { "options.timeout" } else { "timeout" };
-        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
+        let timeout_label = if show_oc { "options.timeout" } else { "timeout" };        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
         let output_mod_label = if show_oc { "modalities.output" } else { "(无)" };
@@ -840,6 +839,31 @@ impl App {
                     p.npm = npm_options[idx].to_string();
                 }
             }
+            if !show_oc {
+                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("api").weak()));
+                let api_options = [
+                    "openai-completions",
+                    "openai-responses",
+                    "anthropic-messages",
+                ];
+                let current_api = if p.pi_api.is_empty() {
+                    convert::npm_to_api(&p.npm)
+                } else {
+                    p.pi_api.clone()
+                };
+                egui::ComboBox::from_id_salt(format!("provider_api_{}", p.key))
+                    .selected_text(&current_api)
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for api in api_options {
+                            let is_selected = current_api == api;
+                            if ui.selectable_label(is_selected, api).clicked() {
+                                p.pi_api = api.to_string();
+                                p.npm = convert::api_to_npm(api);
+                            }
+                        }
+                    });
+            }
         });
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -852,11 +876,13 @@ impl App {
                 egui::Label::new(egui::RichText::new(api_key_label).weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new(timeout_label).weak()),
-            );
-            ui.add(egui::TextEdit::singleline(&mut p.timeout).desired_width(53.0));
+            if show_oc {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new(timeout_label).weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.timeout).desired_width(53.0));
+            }
             if !show_oc {
                 ui.add_sized(
                     [60.0, 24.0],
@@ -1134,6 +1160,31 @@ impl App {
                         self.new_provider.npm = npm_options[idx].to_string();
                     }
                 }
+                if !show_oc {
+                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("api").weak()));
+                    let api_options = [
+                        "openai-completions",
+                        "openai-responses",
+                        "anthropic-messages",
+                    ];
+                    let current_api = if self.new_provider.pi_api.is_empty() {
+                        convert::npm_to_api(&self.new_provider.npm)
+                    } else {
+                        self.new_provider.pi_api.clone()
+                    };
+                    egui::ComboBox::from_id_salt("new_provider_api")
+                        .selected_text(&current_api)
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for api in api_options {
+                                let is_selected = current_api == api;
+                                if ui.selectable_label(is_selected, api).clicked() {
+                                    self.new_provider.pi_api = api.to_string();
+                                    self.new_provider.npm = convert::api_to_npm(api);
+                                }
+                            }
+                        });
+                }
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -1154,15 +1205,17 @@ impl App {
                         .hint_text("sk-xxx")
                         .desired_width(408.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(timeout_label).weak()),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_provider.timeout)
-                        .hint_text("180000")
-                        .desired_width(53.0),
-                );
+                if show_oc {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new(timeout_label).weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.timeout)
+                            .hint_text("180000")
+                            .desired_width(53.0),
+                    );
+                }
                 if !show_oc {
                     ui.add_sized(
                         [60.0, 24.0],
@@ -1424,8 +1477,11 @@ impl App {
             if !self.config_paths.validate_target(ConfigFormat::Opencode) {
                 status_parts.push("opencode: 未安装（~/.config/opencode/opencode.json 不存在）".to_string());
             } else {
-                self.save_opencode();
-                if !self.status.contains("未安装") {
+                let path = self.config_paths.target_path(ConfigFormat::Opencode);
+                self.save_opencode_to(&path);
+                if self.status.contains("保存失败") {
+                    status_parts.push(format!("opencode: {}", self.status));
+                } else {
                     status_parts.push("opencode: 已保存".to_string());
                 }
             }
@@ -1435,19 +1491,17 @@ impl App {
             if !self.config_paths.validate_target(ConfigFormat::PiAgent) {
                 status_parts.push("pi-agent: 未安装（~/.pi/agent/models.json 不存在）".to_string());
             } else {
-                self.save_pi_agent();
-                if !self.status.contains("未安装") {
+                let path = self.config_paths.target_path(ConfigFormat::PiAgent);
+                self.save_pi_agent_to(&path);
+                if self.status.contains("保存失败") {
+                    status_parts.push(format!("pi-agent: {}", self.status));
+                } else {
                     status_parts.push("pi-agent: 已保存".to_string());
                 }
             }
             self.status.clear();
         }
         self.status = status_parts.join("; ");
-    }
-
-    fn save_opencode(&mut self) {
-        let path = self.config_paths.target_path(ConfigFormat::Opencode);
-        self.save_opencode_to(&path);
     }
 
     fn save_opencode_to(&mut self, path: &str) {
@@ -1497,11 +1551,6 @@ impl App {
         }
     }
 
-    fn save_pi_agent(&mut self) {
-        let path = self.config_paths.target_path(ConfigFormat::PiAgent);
-        self.save_pi_agent_to(&path);
-    }
-
     fn save_pi_agent_to(&mut self, path: &str) {
         let root = convert::to_pi_root(&self.providers, &self.pi_extras);
 
@@ -1510,11 +1559,15 @@ impl App {
             SaveFormat::Compact => compact_json(&root),
         };
 
-        if let Err(e) = ensure_parent_dir(path) {
-            self.status = format!("保存失败: {}", e);
-            return;
-        }
-        let write_res = fs::write(path, content).map_err(|e| e.to_string());
+        let write_res = if is_wsl_path(path) {
+            crate::util::write_wsl_file(path, &content)
+        } else {
+            if let Err(e) = ensure_parent_dir(path) {
+                self.status = format!("保存失败: {}", e);
+                return;
+            }
+            fs::write(path, content).map_err(|e| e.to_string())
+        };
         match write_res {
             Ok(()) => {
                 self.status = "已保存到 pi-agent".into();

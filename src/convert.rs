@@ -13,7 +13,7 @@ pub fn npm_to_api(npm: &str) -> String {
 pub fn api_to_npm(api: &str) -> String {
     match api {
         "anthropic-messages" => "@ai-sdk/anthropic".to_string(),
-        "openai-completions" => String::new(),
+        "openai-completions" | "openai-responses" => String::new(),
         other => other.to_string(),
     }
 }
@@ -80,12 +80,7 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
 pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
     let api = str_at(v, "api");
     let npm = api_to_npm(api);
-    let raw_url = str_at(v, "baseUrl").to_string();
-    let base_url = if api == "anthropic-messages" && !raw_url.ends_with("/v1") {
-        format!("{}/v1", raw_url.trim_end_matches('/'))
-    } else {
-        raw_url
-    };
+    let base_url = str_at(v, "baseUrl").to_string();
     let models = v
         .get("models")
         .and_then(|x| x.as_array())
@@ -107,6 +102,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         models,
         new_model: ModelRow::new(),
         raw: v.clone(),
+        pi_api: api.to_string(),
         haystack: String::new(),
     };
     r.refresh_haystack();
@@ -121,7 +117,13 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
             serde_json::json!({"supportsDeveloperRole": false}),
         );
     }
-    let api = npm_to_api(&p.npm);
+    let api = if !p.npm.is_empty() {
+        npm_to_api(&p.npm)
+    } else if !p.pi_api.is_empty() {
+        p.pi_api.clone()
+    } else {
+        "openai-completions".to_string()
+    };
     if !p.base_url.is_empty() {
         let save_url = if api == "anthropic-messages" {
             p.base_url.trim_end_matches("/v1").to_string()

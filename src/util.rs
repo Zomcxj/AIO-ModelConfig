@@ -137,6 +137,36 @@ pub fn is_wsl_path(path: &str) -> bool {
     path.starts_with('/') && !path.contains(':')
 }
 
+pub fn wsl_home() -> Option<String> {
+    let out = Command::new("wsl")
+        .args(["-e", "sh", "-c", "printf %s \"$HOME\""])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let home = String::from_utf8(out.stdout).unwrap_or_default().trim().to_string();
+    if home.is_empty() {
+        None
+    } else {
+        Some(home)
+    }
+}
+
+pub fn wsl_path_exists(path: &str) -> bool {
+    let out = Command::new("wsl")
+        .args(["-e", "sh", "-c", &format!("test -e {} && echo y", path)])
+        .output();
+    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
+}
+
+pub fn wsl_file_exists(path: &str) -> bool {
+    let out = Command::new("wsl")
+        .args(["-e", "sh", "-c", &format!("test -f {} && echo y", path)])
+        .output();
+    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
+}
+
 pub fn win_to_wsl(path: &str) -> String {
     if let Some(ch) = path.chars().next() {
         if ch.is_ascii_alphabetic() && path.len() > 1 && path.as_bytes()[1] == b':' {

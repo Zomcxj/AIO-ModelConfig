@@ -235,6 +235,7 @@ pub struct ProviderRow {
     pub models: Vec<ModelRow>,
     pub new_model: ModelRow,
     pub raw: Value,
+    pub pi_api: String,
     pub haystack: String,
 }
 
@@ -261,6 +262,7 @@ impl ProviderRow {
             models,
             new_model: ModelRow::new(),
             raw: v.clone(),
+            pi_api: String::new(),
             haystack: String::new(),
         };
         r.refresh_haystack();
@@ -279,6 +281,7 @@ impl ProviderRow {
             models: Vec::new(),
             new_model: ModelRow::new(),
             raw: Value::Object(Map::new()),
+            pi_api: String::new(),
             haystack: String::new(),
         };
         r.refresh_haystack();

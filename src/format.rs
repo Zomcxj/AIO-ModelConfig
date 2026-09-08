@@ -1,3 +1,4 @@
+use crate::util::{wsl_file_exists, wsl_home, wsl_path_exists};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,33 @@ impl Default for ConfigPaths {
 }
 
 impl ConfigPaths {
+    pub fn wsl_paths() -> Option<(String, String)> {
+        let home = wsl_home()?;
+        let opencode = format!("{}/.config/opencode/opencode.json", home);
+        let pi_agent = format!("{}/.pi/agent/models.json", home);
+        Some((opencode, pi_agent))
+    }
+
+    pub fn wsl_target(&self, format: ConfigFormat) -> Option<String> {
+        let (oc, pi) = ConfigPaths::wsl_paths()?;
+        match format {
+            ConfigFormat::Opencode => {
+                if wsl_file_exists(&oc) {
+                    Some(oc)
+                } else {
+                    None
+                }
+            }
+            ConfigFormat::PiAgent => {
+                if wsl_path_exists(&pi) {
+                    Some(pi)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     pub fn detect() -> Option<(ConfigFormat, String)> {
         let paths = ConfigPaths::default();
         if Path::new(&paths.opencode).exists() {
@@ -58,7 +86,7 @@ impl ConfigPaths {
     }
 
     pub fn validate_target(&self, format: ConfigFormat) -> bool {
-        match format {
+        let local_ok = match format {
             ConfigFormat::Opencode => Path::new(&self.opencode).exists(),
             ConfigFormat::PiAgent => {
                 self.pi_agent.exists()
@@ -68,10 +96,14 @@ impl ConfigPaths {
                         .map(|p| p.exists())
                         .unwrap_or(false)
             }
-        }
+        };
+        local_ok || self.wsl_target(format).is_some()
     }
 
     pub fn target_path(&self, format: ConfigFormat) -> String {
+        if let Some(wsl) = self.wsl_target(format) {
+            return wsl;
+        }
         match format {
             ConfigFormat::Opencode => self.opencode.clone(),
             ConfigFormat::PiAgent => self.pi_agent.to_string_lossy().into_owned(),
