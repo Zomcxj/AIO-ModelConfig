@@ -59,6 +59,8 @@ cargo build --release
 
 ## 配置文件格式参考
 
+### opencode
+
 工具读取 / 写入 `opencode.json`，核心结构示例如下：
 
 ```jsonc
@@ -97,6 +99,63 @@ cargo build --release
   }
 }
 ```
+
+### pi-agent
+
+工具读取 / 写入 `~/.pi/agent/models.json`，核心结构示例如下：
+
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "sk-...",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 4096
+        }
+      ]
+    },
+    "anthropic": {
+      "baseUrl": "https://api.anthropic.com",
+      "apiKey": "sk-ant-...",
+      "api": "anthropic-messages",
+      "models": [
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}
+```
+
+**格式差异对照：**
+
+| 字段 | opencode | pi-agent |
+|------|----------|----------|
+| Provider key | `provider.{name}` | `providers.{name}` |
+| Base URL | `options.baseURL` | `baseUrl` |
+| API Key | `options.apiKey` | `apiKey` |
+| 模型存储 | Map（key=model id） | Array（含 id 字段） |
+| 上下文长度 | `limit.context` | `contextWindow` |
+| 输出限制 | `limit.output` | `maxTokens` |
+| 输入模态 | `modalities.input` | `input` |
+| API 类型 | `npm` | `api` |
+| 推理档位 | `variants` | 不支持 |
+| 工具调用 | `tool_call` | 不支持 |
+| Agent 定义 | `agent` | 不支持 |
 
 ## 许可证
 
