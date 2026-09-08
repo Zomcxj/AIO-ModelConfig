@@ -73,6 +73,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().map(|mv| model_from_pi(mv)).collect())
         .unwrap_or_default();
+    let compat = v.get("compat").map(|c| c.to_string()).unwrap_or_default();
     let mut r = ProviderRow {
         key: key.to_string(),
         description: String::new(),
@@ -80,6 +81,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         base_url,
         api_key: str_at(v, "apiKey").to_string(),
         timeout: String::new(),
+        compat,
         models,
         new_model: ModelRow::new(),
         raw: v.clone(),
@@ -91,8 +93,10 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
     let mut obj = Map::new();
-    if let Some(compat) = p.raw.get("compat") {
-        obj.insert("compat".into(), compat.clone());
+    if !p.compat.trim().is_empty() {
+        if let Ok(val) = serde_json::from_str::<Value>(&p.compat) {
+            obj.insert("compat".into(), val);
+        }
     }
     let api = npm_to_api(&p.npm);
     if !p.base_url.is_empty() {

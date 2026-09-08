@@ -182,6 +182,7 @@ fn provider_to_pi_preserves_compat() {
         "models": []
     });
     let provider = convert::provider_from_pi("openai", &v);
+    assert_eq!(provider.compat, r#"{"supportsDeveloperRole":false}"#);
     let output = convert::provider_to_pi(&provider);
     assert!(output.get("compat").is_some());
     assert_eq!(output["compat"]["supportsDeveloperRole"], false);

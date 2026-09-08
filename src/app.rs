@@ -871,6 +871,11 @@ impl App {
                 egui::Label::new(egui::RichText::new("timeout").weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.timeout).desired_width(53.0));
+            ui.add_sized(
+                [60.0, 24.0],
+                egui::Label::new(egui::RichText::new("compat").weak()),
+            );
+            ui.add(egui::TextEdit::singleline(&mut p.compat).desired_width(200.0));
         });
 
         ui.add_space(2.0);
@@ -1630,6 +1635,33 @@ fn serialize_pretty_value(value: &Value, level: usize, role: CompactRole) -> Vec
                 .map(String::from)
                 .collect()
         }
+        Value::Array(items) if items.iter().any(|v| v.is_object()) => {
+            let indent = "  ".repeat(level);
+            let child_indent = "  ".repeat(level + 1);
+            let mut lines = vec![format!("{}[", indent)];
+            for (i, item) in items.iter().enumerate() {
+                let item_lines = serialize_pretty_value(item, level + 1, role);
+                let mut entry: Vec<String> = item_lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(j, line)| {
+                        if j == 0 {
+                            format!("{}{}", child_indent, line.trim_start())
+                        } else {
+                            line
+                        }
+                    })
+                    .collect();
+                if i + 1 < items.len() {
+                    if let Some(last) = entry.last_mut() {
+                        last.push(',');
+                    }
+                }
+                lines.extend(entry);
+            }
+            lines.push(format!("{}]", indent));
+            lines
+        }
         _ => vec![compact_json_value(value)],
     }
 }
@@ -1739,7 +1771,42 @@ fn serialize_value(value: &Value, level: usize, role: CompactRole) -> Vec<String
             .lines()
             .map(String::from)
             .collect(),
+        Value::Array(items) if items.iter().any(|v| v.is_object()) => {
+            let indent = "  ".repeat(level);
+            let child_indent = "  ".repeat(level + 1);
+            let mut lines = vec![format!("{}[", indent)];
+            for (i, item) in items.iter().enumerate() {
+                let item_lines = serialize_value(item, level + 1, role);
+                let mut entry: Vec<String> = item_lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(j, line)| {
+                        if j == 0 {
+                            format!("{}{}", child_indent, line.trim_start())
+                        } else {
+                            line
+                        }
+                    })
+                    .collect();
+                if i + 1 < items.len() {
+                    if let Some(last) = entry.last_mut() {
+                        last.push(',');
+                    }
+                }
+                lines.extend(entry);
+            }
+            lines.push(format!("{}]", indent));
+            lines
+        }
         _ => vec![compact_json_value(value)],
+    }
+}
+
+fn has_nested_obj_array(value: &Value) -> bool {
+    match value {
+        Value::Array(arr) => arr.iter().any(|v| v.is_object()),
+        Value::Object(obj) => obj.values().any(|v| has_nested_obj_array(v)),
+        _ => false,
     }
 }
 
@@ -1751,6 +1818,35 @@ fn serialize_fields(object: &Map<String, Value>, level: usize, role: CompactRole
     let fields: Vec<_> = object.iter().collect();
 
     for (index, (key, value)) in fields.iter().enumerate() {
+        let has_obj_array = has_nested_obj_array(value);
+        let prefix = format!("{}: ", json_string(key));
+
+        if has_obj_array {
+            if !current.is_empty() {
+                lines.push(format!("{},", field_indent.clone() + &current));
+                current.clear();
+            }
+            let rendered = serialize_value(value, level + 1, child_role(role, key));
+            let mut nested: Vec<String> = rendered
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    if i == 0 {
+                        format!("{}{}{}", field_indent, prefix, line.trim_start())
+                    } else {
+                        line
+                    }
+                })
+                .collect();
+            if index + 1 < fields.len() {
+                if let Some(last) = nested.last_mut() {
+                    last.push(',');
+                }
+            }
+            lines.extend(nested);
+            continue;
+        }
+
         let single = if *key == "variants" {
             compact_variants(value)
         } else {
@@ -1862,6 +1958,30 @@ mod compact_tests {
         let output = serialize_object(value.as_object().unwrap(), 1, CompactRole::Target);
         assert!(output.contains("\"variants\": { \"medium\": {}, \"high\": {} }"));
         assert!(!output.contains("reasoningEffort"));
+    }
+
+    #[test]
+    fn pi_models_array_expands_to_multiple_lines() {
+        let root = serde_json::json!({
+            "providers": {
+                "openai": {
+                    "api": "openai-completions",
+                    "models": [
+                        { "id": "gpt-4o", "name": "GPT-4o" },
+                        { "id": "gpt-4o-mini", "name": "GPT-4o mini" }
+                    ]
+                }
+            }
+        });
+        let pretty = pretty_json(&root);
+        assert!(pretty.contains("\"models\": [\n"));
+        assert!(pretty.contains("\"id\": \"gpt-4o\", \"name\": \"GPT-4o\""));
+        assert!(pretty.contains("\"id\": \"gpt-4o-mini\", \"name\": \"GPT-4o mini\""));
+
+        let compact = compact_json(&root);
+        assert!(compact.contains("\"models\": [\n"));
+        assert!(compact.contains("\"id\": \"gpt-4o\", \"name\": \"GPT-4o\""));
+        assert!(compact.contains("\"id\": \"gpt-4o-mini\", \"name\": \"GPT-4o mini\""));
     }
 
     #[test]
