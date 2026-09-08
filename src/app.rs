@@ -1,9 +1,9 @@
+use crate::convert;
+use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
 use crate::ui::{card_frame, card_grid, DragHandle, move_item};
-use crate::util::{
-    default_config_path, ensure_parent_dir, is_wsl_path, read_wsl_file, show_file_dialog,
-};
+use crate::util::{is_wsl_path, read_wsl_file, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -45,12 +45,37 @@ pub struct App {
     provider_drag_target: Option<String>,
     theme: Theme,
     save_format: SaveFormat,
+    source_format: ConfigFormat,
+    config_paths: ConfigPaths,
+    save_target: Option<ConfigFormat>,
+    pi_extras: Value,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let path = default_config_path().unwrap_or_default();
-        let (root, agents, providers) = load_or_empty(&path);
+        let paths = ConfigPaths::default();
+        let (format, path, root, agents, providers, pi_extras) =
+            if let Some((fmt, p)) = ConfigPaths::detect() {
+                match fmt {
+                    ConfigFormat::Opencode => {
+                        let (r, a, pv) = load_opencode(&p);
+                        (fmt, p, r, a, pv, Value::Object(Map::new()))
+                    }
+                    ConfigFormat::PiAgent => {
+                        let (r, pv, extras) = load_pi_agent(&p);
+                        (fmt, p, r, Vec::new(), pv, extras)
+                    }
+                }
+            } else {
+                (
+                    ConfigFormat::Opencode,
+                    String::new(),
+                    Value::Object(Map::new()),
+                    Vec::new(),
+                    Vec::new(),
+                    Value::Object(Map::new()),
+                )
+            };
         let agent_open: HashSet<String> = agents.iter().map(|a| a.key.clone()).collect();
         let provider_open: HashSet<String> = providers.iter().map(|p| p.key.clone()).collect();
         Self {
@@ -73,6 +98,10 @@ impl Default for App {
             provider_drag_target: None,
             theme: Theme::default(),
             save_format: SaveFormat::default(),
+            source_format: format,
+            config_paths: paths,
+            save_target: None,
+            pi_extras,
         }
     }
 }
@@ -123,7 +152,27 @@ impl App {
                 if ui.button("浏览").clicked() {
                     if let Some(p) = show_file_dialog() {
                         self.config_path = p;
-                        self.reload();
+                        let (fmt, p) = ConfigPaths::detect_for_path(&self.config_path);
+                        self.source_format = fmt;
+                        match fmt {
+                            ConfigFormat::Opencode => {
+                                let (r, a, pv) = load_opencode(&p);
+                                self.root = r;
+                                self.agents = a;
+                                self.providers = pv;
+                                self.pi_extras = Value::Object(Map::new());
+                            }
+                            ConfigFormat::PiAgent => {
+                                let (r, pv, extras) = load_pi_agent(&p);
+                                self.root = r;
+                                self.agents = Vec::new();
+                                self.providers = pv;
+                                self.pi_extras = extras;
+                            }
+                        }
+                        self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
+                        self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
+                        self.save_target = None;
                     }
                 }
                 if ui.button("保存").clicked() {
@@ -196,6 +245,42 @@ impl App {
                         self.provider_open =
                             self.providers.iter().map(|p| p.key.clone()).collect();
                     }
+                }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
+                );
+                ui.separator();
+                ui.label("保存到:");
+                let oc_selected = self.save_target == Some(ConfigFormat::Opencode);
+                let pi_selected = self.save_target == Some(ConfigFormat::PiAgent);
+                let oc_available = self.config_paths.validate_target(ConfigFormat::Opencode);
+                let pi_available = self.config_paths.validate_target(ConfigFormat::PiAgent);
+                if ui.add_enabled(oc_available, egui::Button::new(
+                    egui::RichText::new("opencode").color(if oc_selected {
+                        egui::Color32::from_rgb(100, 200, 100)
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+                )).clicked() {
+                    self.save_target = if oc_selected {
+                        None
+                    } else {
+                        Some(ConfigFormat::Opencode)
+                    };
+                }
+                if ui.add_enabled(pi_available, egui::Button::new(
+                    egui::RichText::new("pi-agent").color(if pi_selected {
+                        egui::Color32::from_rgb(100, 200, 100)
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+                )).clicked() {
+                    self.save_target = if pi_selected {
+                        None
+                    } else {
+                        Some(ConfigFormat::PiAgent)
+                    };
                 }
             });
         });
@@ -1190,14 +1275,30 @@ impl App {
     }
 
     fn reload(&mut self) {
-        let (root, agents, providers) = load_or_empty(&self.config_path);
-        self.root = root;
-        self.agents = agents;
-        self.providers = providers;
+        let (fmt, path) = ConfigPaths::detect_for_path(&self.config_path);
+        self.source_format = fmt;
+        match fmt {
+            ConfigFormat::Opencode => {
+                let (r, a, pv) = load_opencode(&path);
+                self.root = r;
+                self.agents = a;
+                self.providers = pv;
+                self.pi_extras = Value::Object(Map::new());
+            }
+            ConfigFormat::PiAgent => {
+                let (r, pv, extras) = load_pi_agent(&path);
+                self.root = r;
+                self.agents = Vec::new();
+                self.providers = pv;
+                self.pi_extras = extras;
+            }
+        }
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
+        self.save_target = None;
         self.status = format!(
-            "已加载: {} agents, {} providers",
+            "已加载 ({}): {} agents, {} providers",
+            self.source_format.label(),
             self.agents.len(),
             self.providers.len()
         );
@@ -1258,10 +1359,27 @@ impl App {
     }
 
     fn save(&mut self) {
-        if let Err(e) = ensure_parent_dir(&self.config_path) {
-            self.status = format!("保存失败: {}", e);
+        let target = match self.save_target {
+            Some(t) => t,
+            None => {
+                self.status = "请先选择保存目标".into();
+                return;
+            }
+        };
+        if !self.config_paths.validate_target(target) {
+            self.status = match target {
+                ConfigFormat::Opencode => "opencode 未安装（~/.config/opencode/opencode.json 不存在）".into(),
+                ConfigFormat::PiAgent => "pi-agent 未安装（~/.pi/agent/models.json 不存在）".into(),
+            };
             return;
         }
+        match target {
+            ConfigFormat::Opencode => self.save_opencode(),
+            ConfigFormat::PiAgent => self.save_pi_agent(),
+        }
+    }
+
+    fn save_opencode(&mut self) {
         let mut root = std::mem::take(&mut self.root);
         if let Value::Object(o) = &mut root {
             let mut am = Map::new();
@@ -1286,18 +1404,39 @@ impl App {
             SaveFormat::Compact => compact_json(&root),
         };
 
-        let write_res = if is_wsl_path(&self.config_path) {
-            crate::util::write_wsl_file(&self.config_path, &content)
+        let path = self.config_paths.target_path(ConfigFormat::Opencode);
+        let write_res = if is_wsl_path(&path) {
+            crate::util::write_wsl_file(&path, &content)
         } else {
-            fs::write(&self.config_path, content).map_err(|e| e.to_string())
+            fs::write(&path, content).map_err(|e| e.to_string())
         };
         match write_res {
             Ok(()) => {
                 self.root = root;
-                self.status = "已保存成功".into();
+                self.status = "已保存到 opencode".into();
             }
             Err(e) => {
                 self.root = root;
+                self.status = format!("保存失败: {}", e);
+            }
+        }
+    }
+
+    fn save_pi_agent(&mut self) {
+        let root = convert::to_pi_root(&self.providers, &self.pi_extras);
+
+        let content = match self.save_format {
+            SaveFormat::Current => pretty_json(&root),
+            SaveFormat::Compact => compact_json(&root),
+        };
+
+        let path = self.config_paths.target_path(ConfigFormat::PiAgent);
+        let write_res = fs::write(&path, content).map_err(|e| e.to_string());
+        match write_res {
+            Ok(()) => {
+                self.status = "已保存到 pi-agent".into();
+            }
+            Err(e) => {
                 self.status = format!("保存失败: {}", e);
             }
         }
@@ -1801,4 +1940,30 @@ pub fn load_or_empty(path: &str) -> (Value, Vec<AgentRow>, Vec<ProviderRow>) {
         .unwrap_or_default();
 
     (v, agents, providers)
+}
+
+fn load_opencode(path: &str) -> (Value, Vec<AgentRow>, Vec<ProviderRow>) {
+    load_or_empty(path)
+}
+
+fn load_pi_agent(path: &str) -> (Value, Vec<ProviderRow>, Value) {
+    let content = if path.is_empty() {
+        String::new()
+    } else if std::path::Path::new(path).exists() {
+        match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("load error: {}", e);
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    let v: Value = serde_json::from_str(&content).unwrap_or_else(|_| Value::Object(Map::new()));
+    let providers = convert::load_pi_providers(&v);
+    let extras = convert::load_pi_extras(&v);
+
+    (v, providers, extras)
 }

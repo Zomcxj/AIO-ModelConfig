@@ -3,5 +3,7 @@ pub mod ui;
 pub mod util;
 pub mod app;
 pub mod theme;
+pub mod format;
+pub mod convert;
 #[cfg(target_os = "windows")]
 pub mod cursor;
