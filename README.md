@@ -1,11 +1,14 @@
 # AIO-ModelConfig
 
-可视化编辑 [`opencode`](https://opencode.ai) 配置文件（`opencode.json`）中 **Agents**（子代理）与 **Providers**（模型供应商）的桌面 GUI 工具。
+可视化编辑 [`opencode`](https://opencode.ai) 与 [`pi-agent`](https://github.com/anthropics/pi-agent) 配置文件的桌面 GUI 工具。
 
 基于 Rust + egui/eframe 构建，单文件可执行程序，无需安装运行时。
 
 ## 功能特性
 
+- **双格式支持**：同时支持 opencode (`opencode.json`) 与 pi-agent (`models.json`) 配置格式
+- **自动格式检测**：优先加载 opencode，其次 pi-agent
+- **跨格式保存**：可选择保存到 opencode 或 pi-agent（需已安装对应工具）
 - **Agents / Providers 卡片式管理**
   - 卡片折叠 / 展开（`▶` / `▼`）
   - 拖拽排序：拖动卡片时**仅有目标卡片被高亮**，松手后完成排序
@@ -16,7 +19,9 @@
   - `variants` 推理档位多选：`none / low / medium / high / xhigh / max / ultra`
   - npm 包名选项：`@ai-sdk/openai`、`@ai-sdk/anthropic`、`@ai-sdk/openai-compatible` 等
 - **搜索过滤**：按 key / description / model / baseURL 等关键字过滤列表
-- **文件加载**：支持直接填写配置路径、文件对话框浏览、WSL 路径读取
+- **文件加载**：支持直接填写配置路径、文件对话框浏览、WSL 路径读取、拖拽导入
+- **保存格式**：默认（pretty）/ 压缩（compact）两种 JSON 格式
+- **主题切换**：Dark / Light / Ocean / Nord / Rose 五种主题
 - **中文界面**：自动加载 Windows 系统中文字体（微软雅黑等）
 - **Windows 特性**：自定义"抓取"手势拖拽光标、应用图标
 
