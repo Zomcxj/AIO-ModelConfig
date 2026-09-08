@@ -794,6 +794,14 @@ impl App {
     fn render_provider_form(&mut self, ui: &mut egui::Ui, idx: usize) {
         let p = &mut self.providers[idx];
         let show_oc = self.provider_view_opencode;
+        let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
+        let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
+        let timeout_label = if show_oc { "options.timeout" } else { "timeout" };
+        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
+        let output_label = if show_oc { "limit.output" } else { "maxTokens" };
+        let input_label = if show_oc { "modalities.input" } else { "input" };
+        let output_mod_label = if show_oc { "modalities.output" } else { "(无)" };
+        let variants_label = if show_oc { "variants" } else { "thinkingLevelMap" };
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
             ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
@@ -836,17 +844,17 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("baseURL").weak()),
+                egui::Label::new(egui::RichText::new(base_label).weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(200.0));
             ui.add_sized(
                 [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("apiKey").weak()),
+                egui::Label::new(egui::RichText::new(api_key_label).weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
             ui.add_sized(
                 [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("timeout").weak()),
+                egui::Label::new(egui::RichText::new(timeout_label).weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.timeout).desired_width(53.0));
             if !show_oc {
@@ -877,19 +885,19 @@ impl App {
                 }
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("context:").weak()),
+                    egui::Label::new(egui::RichText::new(context_label).weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.models[j].context).desired_width(53.0));
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("output:").weak()),
+                    egui::Label::new(egui::RichText::new(output_label).weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.models[j].output).desired_width(53.0));
             });
             ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("modalities.input:").weak()),
+                    egui::Label::new(egui::RichText::new(input_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut p.models[j].modalities_input)
@@ -897,7 +905,7 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("modalities.output:").weak()),
+                    egui::Label::new(egui::RichText::new(output_mod_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut p.models[j].modalities_output)
@@ -905,7 +913,7 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("variants:").weak()),
+                    egui::Label::new(egui::RichText::new(variants_label).weak()),
                 );
                 let variant_names = [
                     "none", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -984,19 +992,19 @@ impl App {
                 }
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("context:").weak()),
+                    egui::Label::new(egui::RichText::new(context_label).weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.context).desired_width(53.0));
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("output:").weak()),
+                    egui::Label::new(egui::RichText::new(output_label).weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.output).desired_width(53.0));
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("modalities.input:").weak()),
+                    egui::Label::new(egui::RichText::new(input_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut p.new_model.modalities_input)
@@ -1004,7 +1012,7 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("modalities.output:").weak()),
+                    egui::Label::new(egui::RichText::new(output_mod_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut p.new_model.modalities_output)
@@ -1012,7 +1020,7 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("variants:").weak()),
+                    egui::Label::new(egui::RichText::new(variants_label).weak()),
                 );
                 let variant_names = [
                     "none", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -1072,6 +1080,14 @@ impl App {
 
     fn ui_new_provider_form(&mut self, ui: &mut egui::Ui) {
         let show_oc = self.provider_view_opencode;
+        let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
+        let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
+        let timeout_label = if show_oc { "options.timeout" } else { "timeout" };
+        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
+        let output_label = if show_oc { "limit.output" } else { "maxTokens" };
+        let input_label = if show_oc { "modalities.input" } else { "input" };
+        let output_mod_label = if show_oc { "modalities.output" } else { "(无)" };
+        let variants_label = if show_oc { "variants" } else { "thinkingLevelMap" };
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
@@ -1122,7 +1138,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("baseURL").weak()),
+                    egui::Label::new(egui::RichText::new(base_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.base_url)
@@ -1131,7 +1147,7 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("apiKey").weak()),
+                    egui::Label::new(egui::RichText::new(api_key_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.api_key)
@@ -1140,7 +1156,7 @@ impl App {
                 );
                 ui.add_sized(
                     [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("timeout").weak()),
+                    egui::Label::new(egui::RichText::new(timeout_label).weak()),
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.timeout)
@@ -1174,12 +1190,12 @@ impl App {
                     }
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("context:").weak()),
+                        egui::Label::new(egui::RichText::new(context_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].context).desired_width(53.0));
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("output:").weak()),
+                        egui::Label::new(egui::RichText::new(output_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].output).desired_width(53.0));
                     if ui.button("删").clicked() {
@@ -1216,29 +1232,29 @@ impl App {
                     }
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("context:").weak()),
+                        egui::Label::new(egui::RichText::new(context_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.context).desired_width(53.0));
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("output:").weak()),
+                        egui::Label::new(egui::RichText::new(output_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.output).desired_width(53.0));
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("modalities.input:").weak()),
+                        egui::Label::new(egui::RichText::new(input_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_input).desired_width(80.0));
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("modalities.output:").weak()),
+                        egui::Label::new(egui::RichText::new(output_mod_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_output).desired_width(80.0));
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("variants:").weak()),
+                        egui::Label::new(egui::RichText::new(variants_label).weak()),
                     );
                     let variant_names = [
                         "none", "low", "medium", "high", "xhigh", "max", "ultra",
