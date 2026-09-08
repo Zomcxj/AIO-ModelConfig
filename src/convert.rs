@@ -62,6 +62,12 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
 pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
     let api = str_at(v, "api");
     let npm = api_to_npm(api);
+    let raw_url = str_at(v, "baseUrl").to_string();
+    let base_url = if api == "anthropic-messages" && !raw_url.ends_with("/v1") {
+        format!("{}/v1", raw_url.trim_end_matches('/'))
+    } else {
+        raw_url
+    };
     let models = v
         .get("models")
         .and_then(|x| x.as_array())
@@ -71,7 +77,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         key: key.to_string(),
         description: String::new(),
         npm,
-        base_url: str_at(v, "baseUrl").to_string(),
+        base_url,
         api_key: str_at(v, "apiKey").to_string(),
         timeout: String::new(),
         models,
@@ -88,13 +94,18 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
     if let Some(compat) = p.raw.get("compat") {
         obj.insert("compat".into(), compat.clone());
     }
+    let api = npm_to_api(&p.npm);
     if !p.base_url.is_empty() {
-        obj.insert("baseUrl".into(), Value::String(p.base_url.clone()));
+        let save_url = if api == "anthropic-messages" {
+            p.base_url.trim_end_matches("/v1").to_string()
+        } else {
+            p.base_url.clone()
+        };
+        obj.insert("baseUrl".into(), Value::String(save_url));
     }
     if !p.api_key.is_empty() {
         obj.insert("apiKey".into(), Value::String(p.api_key.clone()));
     }
-    let api = npm_to_api(&p.npm);
     obj.insert("api".into(), Value::String(api));
     let models: Vec<Value> = p.models.iter().map(|m| model_to_pi(m)).collect();
     obj.insert("models".into(), Value::Array(models));

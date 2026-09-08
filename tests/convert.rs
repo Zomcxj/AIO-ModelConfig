@@ -186,3 +186,31 @@ fn provider_to_pi_preserves_compat() {
     assert!(output.get("compat").is_some());
     assert_eq!(output["compat"]["supportsDeveloperRole"], false);
 }
+
+#[test]
+fn anthropic_url_v1_handling() {
+    let v = json!({
+        "baseUrl": "https://api.anthropic.com",
+        "apiKey": "sk-ant-test",
+        "api": "anthropic-messages",
+        "models": []
+    });
+    let provider = convert::provider_from_pi("anthropic", &v);
+    assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
+    let output = convert::provider_to_pi(&provider);
+    assert_eq!(output["baseUrl"], "https://api.anthropic.com");
+}
+
+#[test]
+fn anthropic_url_v1_already_present() {
+    let v = json!({
+        "baseUrl": "https://api.anthropic.com/v1",
+        "apiKey": "sk-ant-test",
+        "api": "anthropic-messages",
+        "models": []
+    });
+    let provider = convert::provider_from_pi("anthropic", &v);
+    assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
+    let output = convert::provider_to_pi(&provider);
+    assert_eq!(output["baseUrl"], "https://api.anthropic.com");
+}
