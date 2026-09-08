@@ -102,7 +102,7 @@ impl Default for App {
             source_format: format,
             config_paths: paths,
             save_target: None,
-            save_to_current: false,
+            save_to_current: true,
             pi_extras,
         }
     }
@@ -175,7 +175,7 @@ impl App {
                         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
                         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
                         self.save_target = None;
-                        self.save_to_current = false;
+                        self.save_to_current = true;
                     }
                 }
                 if ui.button("保存").clicked() {
@@ -209,10 +209,8 @@ impl App {
                     ui.visuals().text_color()
                 };
                 if ui.button(egui::RichText::new("当前文件").color(current_color)).clicked() {
-                    self.save_to_current = !self.save_to_current;
-                    if self.save_to_current {
-                        self.save_target = None;
-                    }
+                    self.save_to_current = true;
+                    self.save_target = None;
                 }
                 let oc_selected = self.save_target == Some(ConfigFormat::Opencode) && !self.save_to_current;
                 let pi_selected = self.save_target == Some(ConfigFormat::PiAgent) && !self.save_to_current;
@@ -226,11 +224,7 @@ impl App {
                     }),
                 )).clicked() {
                     self.save_to_current = false;
-                    self.save_target = if oc_selected {
-                        None
-                    } else {
-                        Some(ConfigFormat::Opencode)
-                    };
+                    self.save_target = Some(ConfigFormat::Opencode);
                 }
                 if ui.add_enabled(pi_available, egui::Button::new(
                     egui::RichText::new("pi-agent").color(if pi_selected {
@@ -240,11 +234,7 @@ impl App {
                     }),
                 )).clicked() {
                     self.save_to_current = false;
-                    self.save_target = if pi_selected {
-                        None
-                    } else {
-                        Some(ConfigFormat::PiAgent)
-                    };
+                    self.save_target = Some(ConfigFormat::PiAgent);
                 }
             });
             ui.horizontal(|ui| {
@@ -1322,7 +1312,7 @@ impl App {
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
         self.save_target = None;
-        self.save_to_current = false;
+        self.save_to_current = true;
         self.status = format!(
             "已加载 ({}): {} agents, {} providers",
             self.source_format.label(),
