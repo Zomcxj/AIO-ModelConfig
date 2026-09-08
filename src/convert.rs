@@ -73,7 +73,12 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         .and_then(|x| x.as_array())
         .map(|arr| arr.iter().map(|mv| model_from_pi(mv)).collect())
         .unwrap_or_default();
-    let compat = v.get("compat").map(|c| c.to_string()).unwrap_or_default();
+    let compat = v
+        .get("compat")
+        .and_then(|c| c.get("supportsDeveloperRole"))
+        .and_then(|v| v.as_bool())
+        .map(|b| b.to_string())
+        .unwrap_or_default();
     let mut r = ProviderRow {
         key: key.to_string(),
         description: String::new(),
@@ -93,10 +98,11 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
     let mut obj = Map::new();
-    if !p.compat.trim().is_empty() {
-        if let Ok(val) = serde_json::from_str::<Value>(&p.compat) {
-            obj.insert("compat".into(), val);
-        }
+    if p.compat == "false" {
+        obj.insert(
+            "compat".into(),
+            serde_json::json!({"supportsDeveloperRole": false}),
+        );
     }
     let api = npm_to_api(&p.npm);
     if !p.base_url.is_empty() {

@@ -182,10 +182,40 @@ fn provider_to_pi_preserves_compat() {
         "models": []
     });
     let provider = convert::provider_from_pi("openai", &v);
-    assert_eq!(provider.compat, r#"{"supportsDeveloperRole":false}"#);
+    assert_eq!(provider.compat, "false");
     let output = convert::provider_to_pi(&provider);
-    assert!(output.get("compat").is_some());
     assert_eq!(output["compat"]["supportsDeveloperRole"], false);
+}
+
+#[test]
+fn provider_to_pi_omits_compat_when_true() {
+    let v = json!({
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-test",
+        "api": "openai-completions",
+        "compat": {
+            "supportsDeveloperRole": true
+        },
+        "models": []
+    });
+    let provider = convert::provider_from_pi("openai", &v);
+    assert_eq!(provider.compat, "true");
+    let output = convert::provider_to_pi(&provider);
+    assert!(output.get("compat").is_none(), "compat should be omitted when true");
+}
+
+#[test]
+fn provider_to_pi_omits_compat_when_empty() {
+    let v = json!({
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-test",
+        "api": "openai-completions",
+        "models": []
+    });
+    let provider = convert::provider_from_pi("openai", &v);
+    assert_eq!(provider.compat, "");
+    let output = convert::provider_to_pi(&provider);
+    assert!(output.get("compat").is_none(), "compat should be omitted when not present");
 }
 
 #[test]

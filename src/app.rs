@@ -875,7 +875,25 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("compat").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut p.compat).desired_width(200.0));
+            let compat_options = ["", "false", "true"];
+            let compat_labels = ["无", "false (写入)", "true (省略)"];
+            let current_idx = match p.compat.as_str() {
+                "false" => 1,
+                "true" => 2,
+                _ => 0,
+            };
+            let mut selected = current_idx;
+            egui::ComboBox::from_id_salt(format!("compat_{}", p.key))
+                .selected_text(compat_labels[current_idx])
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for (i, label) in compat_labels.iter().enumerate() {
+                        if ui.selectable_label(selected == i, *label).clicked() {
+                            selected = i;
+                        }
+                    }
+                });
+            p.compat = compat_options[selected].to_string();
         });
 
         ui.add_space(2.0);
