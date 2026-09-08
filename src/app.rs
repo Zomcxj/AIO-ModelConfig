@@ -47,8 +47,10 @@ pub struct App {
     save_format: SaveFormat,
     source_format: ConfigFormat,
     config_paths: ConfigPaths,
-    save_target: Option<ConfigFormat>,
-    save_to_current: bool,
+    save_current: bool,
+    save_opencode: bool,
+    save_pi_agent: bool,
+    provider_view_opencode: bool,
     pi_extras: Value,
 }
 
@@ -101,8 +103,10 @@ impl Default for App {
             save_format: SaveFormat::default(),
             source_format: format,
             config_paths: paths,
-            save_target: None,
-            save_to_current: true,
+            save_current: true,
+            save_opencode: false,
+            save_pi_agent: false,
+            provider_view_opencode: format == ConfigFormat::Opencode,
             pi_extras,
         }
     }
@@ -174,8 +178,9 @@ impl App {
                         }
                         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
                         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
-                        self.save_target = None;
-                        self.save_to_current = true;
+                        self.save_current = true;
+                        self.save_opencode = false;
+                        self.save_pi_agent = false;
                     }
                 }
                 if ui.button("保存").clicked() {
@@ -201,41 +206,12 @@ impl App {
                     };
                 }
                 ui.separator();
-                ui.label("保存到:");
-                let current_selected = self.save_to_current;
-                let current_color = if current_selected {
-                    egui::Color32::from_rgb(100, 200, 100)
-                } else {
-                    ui.visuals().text_color()
-                };
-                if ui.button(egui::RichText::new("当前文件").color(current_color)).clicked() {
-                    self.save_to_current = true;
-                    self.save_target = None;
-                }
-                let oc_selected = self.save_target == Some(ConfigFormat::Opencode) && !self.save_to_current;
-                let pi_selected = self.save_target == Some(ConfigFormat::PiAgent) && !self.save_to_current;
+                ui.label("保存位置:");
+                ui.checkbox(&mut self.save_current, "当前文件");
                 let oc_available = self.config_paths.validate_target(ConfigFormat::Opencode);
+                ui.add_enabled(oc_available, egui::Checkbox::new(&mut self.save_opencode, "opencode"));
                 let pi_available = self.config_paths.validate_target(ConfigFormat::PiAgent);
-                if ui.add_enabled(oc_available, egui::Button::new(
-                    egui::RichText::new("opencode").color(if oc_selected {
-                        egui::Color32::from_rgb(100, 200, 100)
-                    } else {
-                        ui.visuals().text_color()
-                    }),
-                )).clicked() {
-                    self.save_to_current = false;
-                    self.save_target = Some(ConfigFormat::Opencode);
-                }
-                if ui.add_enabled(pi_available, egui::Button::new(
-                    egui::RichText::new("pi-agent").color(if pi_selected {
-                        egui::Color32::from_rgb(100, 200, 100)
-                    } else {
-                        ui.visuals().text_color()
-                    }),
-                )).clicked() {
-                    self.save_to_current = false;
-                    self.save_target = Some(ConfigFormat::PiAgent);
-                }
+                ui.add_enabled(pi_available, egui::Checkbox::new(&mut self.save_pi_agent, "pi-agent"));
             });
             ui.horizontal(|ui| {
                 ui.label("主题:");
@@ -679,6 +655,15 @@ impl App {
     fn ui_providers_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Providers");
+            let oc_label = if self.provider_view_opencode { "opencode" } else { "pi-agent" };
+            let oc_color = if self.provider_view_opencode {
+                egui::Color32::from_rgb(100, 200, 100)
+            } else {
+                egui::Color32::from_rgb(200, 100, 100)
+            };
+            if ui.button(egui::RichText::new(format!("切换: {}", oc_label)).color(oc_color)).clicked() {
+                self.provider_view_opencode = !self.provider_view_opencode;
+            }
         });
         ui.separator();
 
@@ -808,6 +793,7 @@ impl App {
 
     fn render_provider_form(&mut self, ui: &mut egui::Ui, idx: usize) {
         let p = &mut self.providers[idx];
+        let show_oc = self.provider_view_opencode;
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
             ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
@@ -816,33 +802,35 @@ impl App {
                 egui::Label::new(egui::RichText::new("description").weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.description).desired_width(450.0));
-            ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
-            let npm_options = [
-                "",
-                "@ai-sdk/openai",
-                "@ai-sdk/anthropic",
-                "@ai-sdk/openai-compatible",
-            ];
-            let current_npm = p.npm.clone();
-            let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
-            egui::ComboBox::from_id_salt(format!("provider_npm_{}", p.key))
-                .selected_text(if current_npm.is_empty() {
-                    "选择 npm 包..."
-                } else {
-                    &current_npm
-                })
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    for (i, npm) in npm_options.iter().enumerate() {
-                        let is_selected = selected_npm == Some(i);
-                        let label = if npm.is_empty() { "(空)" } else { *npm };
-                        if ui.selectable_label(is_selected, label).clicked() {
-                            selected_npm = Some(i);
+            if show_oc {
+                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
+                let npm_options = [
+                    "",
+                    "@ai-sdk/openai",
+                    "@ai-sdk/anthropic",
+                    "@ai-sdk/openai-compatible",
+                ];
+                let current_npm = p.npm.clone();
+                let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
+                egui::ComboBox::from_id_salt(format!("provider_npm_{}", p.key))
+                    .selected_text(if current_npm.is_empty() {
+                        "选择 npm 包..."
+                    } else {
+                        &current_npm
+                    })
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (i, npm) in npm_options.iter().enumerate() {
+                            let is_selected = selected_npm == Some(i);
+                            let label = if npm.is_empty() { "(空)" } else { *npm };
+                            if ui.selectable_label(is_selected, label).clicked() {
+                                selected_npm = Some(i);
+                            }
                         }
-                    }
-                });
-            if let Some(idx) = selected_npm {
-                p.npm = npm_options[idx].to_string();
+                    });
+                if let Some(idx) = selected_npm {
+                    p.npm = npm_options[idx].to_string();
+                }
             }
         });
         ui.horizontal(|ui| {
@@ -861,11 +849,13 @@ impl App {
                 egui::Label::new(egui::RichText::new("timeout").weak()),
             );
             ui.add(egui::TextEdit::singleline(&mut p.timeout).desired_width(53.0));
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("compat").weak()),
-            );
-            ui.checkbox(&mut p.compat, "supportsDeveloperRole");
+            if !show_oc {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("compat").weak()),
+                );
+                ui.checkbox(&mut p.compat, "supportsDeveloperRole");
+            }
         });
 
         ui.add_space(2.0);
@@ -881,8 +871,10 @@ impl App {
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0));
                 ui.checkbox(&mut p.models[j].reasoning, "reasoning");
-                ui.checkbox(&mut p.models[j].tool_call, "tool_call");
-                ui.checkbox(&mut p.models[j].store, "store");
+                if show_oc {
+                    ui.checkbox(&mut p.models[j].tool_call, "tool_call");
+                    ui.checkbox(&mut p.models[j].store, "store");
+                }
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("context:").weak()),
@@ -986,8 +978,10 @@ impl App {
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.name).desired_width(120.0));
                 ui.checkbox(&mut p.new_model.reasoning, "reasoning");
-                ui.checkbox(&mut p.new_model.tool_call, "tool_call");
-                ui.checkbox(&mut p.new_model.store, "store");
+                if show_oc {
+                    ui.checkbox(&mut p.new_model.tool_call, "tool_call");
+                    ui.checkbox(&mut p.new_model.store, "store");
+                }
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("context:").weak()),
@@ -1077,6 +1071,7 @@ impl App {
     }
 
     fn ui_new_provider_form(&mut self, ui: &mut egui::Ui) {
+        let show_oc = self.provider_view_opencode;
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
@@ -1094,32 +1089,34 @@ impl App {
                         .hint_text("简要描述此 provider")
                         .desired_width(450.0),
                 );
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
-                let npm_options = [
-                    "",
-                    "@ai-sdk/openai",
-                    "@ai-sdk/anthropic",
-                    "@ai-sdk/openai-compatible",
-                ];
-                let current_npm = self.new_provider.npm.clone();
-                let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
-                egui::ComboBox::from_id_salt("new_provider_npm")
-                    .selected_text(if current_npm.is_empty() {
-                        "选择 npm 包..."
-                    } else {
-                        &current_npm
-                    })
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for (i, npm) in npm_options.iter().enumerate() {
-                            let is_selected = selected_npm == Some(i);
-                            if ui.selectable_label(is_selected, *npm).clicked() {
-                                selected_npm = Some(i);
+                if show_oc {
+                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
+                    let npm_options = [
+                        "",
+                        "@ai-sdk/openai",
+                        "@ai-sdk/anthropic",
+                        "@ai-sdk/openai-compatible",
+                    ];
+                    let current_npm = self.new_provider.npm.clone();
+                    let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
+                    egui::ComboBox::from_id_salt("new_provider_npm")
+                        .selected_text(if current_npm.is_empty() {
+                            "选择 npm 包..."
+                        } else {
+                            &current_npm
+                        })
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for (i, npm) in npm_options.iter().enumerate() {
+                                let is_selected = selected_npm == Some(i);
+                                if ui.selectable_label(is_selected, *npm).clicked() {
+                                    selected_npm = Some(i);
+                                }
                             }
-                        }
-                    });
-                if let Some(idx) = selected_npm {
-                    self.new_provider.npm = npm_options[idx].to_string();
+                        });
+                    if let Some(idx) = selected_npm {
+                        self.new_provider.npm = npm_options[idx].to_string();
+                    }
                 }
             });
             ui.horizontal(|ui| {
@@ -1150,6 +1147,13 @@ impl App {
                         .hint_text("180000")
                         .desired_width(53.0),
                 );
+                if !show_oc {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("compat").weak()),
+                    );
+                    ui.checkbox(&mut self.new_provider.compat, "supportsDeveloperRole");
+                }
             });
             ui.add_space(2.0);
             ui.strong("Models");
@@ -1164,8 +1168,10 @@ impl App {
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].name).desired_width(120.0));
                     ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
-                    ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
-                    ui.checkbox(&mut self.new_provider.models[j].store, "store");
+                    if show_oc {
+                        ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
+                        ui.checkbox(&mut self.new_provider.models[j].store, "store");
+                    }
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("context:").weak()),
@@ -1204,8 +1210,10 @@ impl App {
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.name).desired_width(120.0));
                     ui.checkbox(&mut self.new_provider.new_model.reasoning, "reasoning");
-                    ui.checkbox(&mut self.new_provider.new_model.tool_call, "tool_call");
-                    ui.checkbox(&mut self.new_provider.new_model.store, "store");
+                    if show_oc {
+                        ui.checkbox(&mut self.new_provider.new_model.tool_call, "tool_call");
+                        ui.checkbox(&mut self.new_provider.new_model.store, "store");
+                    }
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("context:").weak()),
@@ -1311,8 +1319,9 @@ impl App {
         }
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
-        self.save_target = None;
-        self.save_to_current = true;
+        self.save_current = true;
+        self.save_opencode = false;
+        self.save_pi_agent = false;
         self.status = format!(
             "已加载 ({}): {} agents, {} providers",
             self.source_format.label(),
@@ -1376,39 +1385,48 @@ impl App {
     }
 
     fn save(&mut self) {
-        if self.save_to_current {
-            self.save_to_current_file();
+        if !self.save_current && !self.save_opencode && !self.save_pi_agent {
+            self.status = "请先选择保存目标".into();
             return;
         }
-        let target = match self.save_target {
-            Some(t) => t,
-            None => {
-                self.status = "请先选择保存目标".into();
-                return;
+        let mut status_parts = Vec::new();
+        if self.save_current {
+            if self.config_path.is_empty() {
+                status_parts.push("当前文件: 没有打开的文件".to_string());
+            } else {
+                match self.source_format {
+                    ConfigFormat::Opencode => self.save_opencode_to(&self.config_path.clone()),
+                    ConfigFormat::PiAgent => self.save_pi_agent_to(&self.config_path.clone()),
+                }
+                if !self.status.contains("未安装") && !self.status.contains("没有打开") {
+                    status_parts.push(format!("当前文件: 已保存"));
+                }
             }
-        };
-        if !self.config_paths.validate_target(target) {
-            self.status = match target {
-                ConfigFormat::Opencode => "opencode 未安装（~/.config/opencode/opencode.json 不存在）".into(),
-                ConfigFormat::PiAgent => "pi-agent 未安装（~/.pi/agent/models.json 不存在）".into(),
-            };
-            return;
+            self.status.clear();
         }
-        match target {
-            ConfigFormat::Opencode => self.save_opencode(),
-            ConfigFormat::PiAgent => self.save_pi_agent(),
+        if self.save_opencode {
+            if !self.config_paths.validate_target(ConfigFormat::Opencode) {
+                status_parts.push("opencode: 未安装（~/.config/opencode/opencode.json 不存在）".to_string());
+            } else {
+                self.save_opencode();
+                if !self.status.contains("未安装") {
+                    status_parts.push("opencode: 已保存".to_string());
+                }
+            }
+            self.status.clear();
         }
-    }
-
-    fn save_to_current_file(&mut self) {
-        if self.config_path.is_empty() {
-            self.status = "没有打开的文件".into();
-            return;
+        if self.save_pi_agent {
+            if !self.config_paths.validate_target(ConfigFormat::PiAgent) {
+                status_parts.push("pi-agent: 未安装（~/.pi/agent/models.json 不存在）".to_string());
+            } else {
+                self.save_pi_agent();
+                if !self.status.contains("未安装") {
+                    status_parts.push("pi-agent: 已保存".to_string());
+                }
+            }
+            self.status.clear();
         }
-        match self.source_format {
-            ConfigFormat::Opencode => self.save_opencode_to(&self.config_path.clone()),
-            ConfigFormat::PiAgent => self.save_pi_agent_to(&self.config_path.clone()),
-        }
+        self.status = status_parts.join("; ");
     }
 
     fn save_opencode(&mut self) {
