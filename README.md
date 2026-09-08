@@ -1,4 +1,4 @@
-# opencode-model-config
+# AIO-ModelConfig
 
 可视化编辑 [`opencode`](https://opencode.ai) 配置文件（`opencode.json`）中 **Agents**（子代理）与 **Providers**（模型供应商）的桌面 GUI 工具。
 
@@ -40,7 +40,7 @@
 cargo build --release
 ```
 
-产物为单文件可执行程序：`target/release/opencode-model-config.exe`
+产物为单文件可执行程序：`target/release/aio-model-config.exe`
 
 ## 资源文件
 

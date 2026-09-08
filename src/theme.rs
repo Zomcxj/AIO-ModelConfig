@@ -41,7 +41,7 @@ impl Theme {
     }
 
     /// Builds a full Style (theme visuals + shared spacing/rounding) and applies it.
-    pub fn apply(&self, ctx: &egui::Context, radius: Radius) {
+    pub fn apply(&self, ctx: &egui::Context) {
         let mut style = egui::Style::default();
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.button_padding = egui::vec2(14.0, 3.0);
@@ -49,7 +49,7 @@ impl Theme {
         style.spacing.scroll.bar_outer_margin = 0.0;
         style.spacing.scroll.floating = true;
         style.visuals = self.palette().into_visuals();
-        let r = radius.value();
+        let r = 20u8;
         for w in [
             &mut style.visuals.widgets.noninteractive,
             &mut style.visuals.widgets.inactive,
@@ -59,38 +59,6 @@ impl Theme {
             w.corner_radius = r.into();
         }
         ctx.set_style(style);
-    }
-}
-
-/// Corner radius presets, switchable at runtime.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Radius {
-    Sharp,
-    Small,
-    #[default]
-    Round,
-    Large,
-}
-
-impl Radius {
-    pub const ALL: [Radius; 4] = [Radius::Sharp, Radius::Small, Radius::Round, Radius::Large];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Radius::Sharp => "直角",
-            Radius::Small => "小圆角",
-            Radius::Round => "圆角",
-            Radius::Large => "大圆角",
-        }
-    }
-
-    pub fn value(&self) -> u8 {
-        match self {
-            Radius::Sharp => 0,
-            Radius::Small => 4,
-            Radius::Round => 8,
-            Radius::Large => 14,
-        }
     }
 }
 

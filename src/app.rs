@@ -1,5 +1,5 @@
 use crate::model::{AgentRow, ModelRow, ProviderRow};
-use crate::theme::{Radius, Theme};
+use crate::theme::Theme;
 use crate::ui::{card_frame, card_grid, DragHandle, move_item};
 use crate::util::{
     default_config_path, ensure_parent_dir, is_wsl_path, read_wsl_file, show_file_dialog,
@@ -11,8 +11,8 @@ use std::fs;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum SaveFormat {
-    #[default]
     Current,
+    #[default]
     Compact,
 }
 
@@ -44,7 +44,6 @@ pub struct App {
     provider_drag_src: Option<String>,
     provider_drag_target: Option<String>,
     theme: Theme,
-    radius: Radius,
     save_format: SaveFormat,
 }
 
@@ -73,7 +72,6 @@ impl Default for App {
             provider_drag_src: None,
             provider_drag_target: None,
             theme: Theme::default(),
-            radius: Radius::default(),
             save_format: SaveFormat::default(),
         }
     }
@@ -81,6 +79,16 @@ impl Default for App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let dropped = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .first()
+                .and_then(|f| f.path.as_ref().map(|p| p.to_string_lossy().into_owned()))
+        });
+        if let Some(path) = dropped {
+            self.config_path = path;
+            self.reload();
+        }
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -106,7 +114,7 @@ impl eframe::App for App {
 impl App {
     fn ui_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.style_mut().spacing.interact_size.y = 10.0;
+            ui.style_mut().spacing.interact_size.y = 18.0;
             ui.horizontal(|ui| {
                 ui.label("配置文件:");
                 ui.add(
@@ -121,6 +129,48 @@ impl App {
                 if ui.button("保存").clicked() {
                     self.save();
                 }
+                ui.separator();
+                ui.label("保存格式:");
+                let format_btn = ui.button(self.save_format.label());
+                if format_btn.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let scroll = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. })));
+                if scroll && format_btn.hovered() {
+                    self.save_format = match self.save_format {
+                        SaveFormat::Current => SaveFormat::Compact,
+                        SaveFormat::Compact => SaveFormat::Current,
+                    };
+                }
+                if format_btn.clicked() {
+                    self.save_format = match self.save_format {
+                        SaveFormat::Current => SaveFormat::Compact,
+                        SaveFormat::Compact => SaveFormat::Current,
+                    };
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("主题:");
+                let theme_btn = ui.button(self.theme.label());
+                let popup_id = ui.make_persistent_id("theme_popup");
+                if theme_btn.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(popup_id));
+                }
+                egui::popup_below_widget(
+                    ui,
+                    popup_id,
+                    &theme_btn,
+                    egui::PopupCloseBehavior::CloseOnClick,
+                    |ui| {
+                        ui.set_min_width(80.0);
+                        for t in Theme::ALL {
+                            if ui.selectable_label(self.theme == t, t.label()).clicked() {
+                                self.theme = t;
+                                t.apply(ctx);
+                            }
+                        }
+                    },
+                );
                 ui.separator();
                 ui.label("搜索:");
                 ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(160.0));
@@ -147,49 +197,6 @@ impl App {
                             self.providers.iter().map(|p| p.key.clone()).collect();
                     }
                 }
-                ui.separator();
-                ui.label("主题:");
-                let theme_btn = ui.button(self.theme.label());
-                let popup_id = ui.make_persistent_id("theme_popup");
-                if theme_btn.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(popup_id));
-                }
-                egui::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &theme_btn,
-                    egui::PopupCloseBehavior::CloseOnClick,
-                    |ui| {
-                        ui.set_min_width(80.0);
-                        for t in Theme::ALL {
-                            if ui.selectable_label(self.theme == t, t.label()).clicked() {
-                                self.theme = t;
-                                t.apply(ctx, self.radius);
-                            }
-                        }
-                    },
-                );
-                ui.label("圆角:");
-                let radius_btn = ui.button(self.radius.label());
-                let radius_popup_id = ui.make_persistent_id("radius_popup");
-                if radius_btn.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(radius_popup_id));
-                }
-                egui::popup_below_widget(
-                    ui,
-                    radius_popup_id,
-                    &radius_btn,
-                    egui::PopupCloseBehavior::CloseOnClick,
-                    |ui| {
-                        ui.set_min_width(80.0);
-                        for r in Radius::ALL {
-                            if ui.selectable_label(self.radius == r, r.label()).clicked() {
-                                self.radius = r;
-                                self.theme.apply(ctx, r);
-                            }
-                        }
-                    },
-                );
             });
         });
     }
@@ -208,23 +215,6 @@ impl App {
                     ))
                     .weak(),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::ComboBox::from_id_salt("save_format")
-                        .selected_text(self.save_format.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.save_format,
-                                SaveFormat::Current,
-                                SaveFormat::Current.label(),
-                            );
-                            ui.selectable_value(
-                                &mut self.save_format,
-                                SaveFormat::Compact,
-                                SaveFormat::Compact.label(),
-                            );
-                        });
-                    ui.label("保存格式:");
-                });
             });
         });
     }
@@ -1292,8 +1282,8 @@ impl App {
         }
 
         let content = match self.save_format {
-            SaveFormat::Current => compact_json(&root),
-            SaveFormat::Compact => compact_json_minified(&root),
+            SaveFormat::Current => pretty_json(&root),
+            SaveFormat::Compact => compact_json(&root),
         };
 
         let write_res = if is_wsl_path(&self.config_path) {
@@ -1303,6 +1293,7 @@ impl App {
         };
         match write_res {
             Ok(()) => {
+                self.root = root;
                 self.status = "已保存成功".into();
             }
             Err(e) => {
@@ -1332,6 +1323,149 @@ fn compact_json(root: &Value) -> String {
     );
     lines.push('\n');
     lines
+}
+
+fn pretty_json(root: &Value) -> String {
+    let normalized = strip_variant_settings(root);
+    let mut lines = serialize_pretty(
+        normalized.as_object().unwrap_or(&Map::new()),
+        0,
+        CompactRole::Normal,
+    );
+    lines.push('\n');
+    lines
+}
+
+const PRETTY_LINE_MAX: usize = 100;
+
+fn serialize_pretty(object: &Map<String, Value>, level: usize, role: CompactRole) -> String {
+    let indent = "  ".repeat(level);
+    let child_indent = "  ".repeat(level + 1);
+
+    let mut raw_entries: Vec<(String, Vec<String>)> = Vec::new();
+    for (key, value) in object.iter() {
+        let child_role = child_role(role, key);
+        let value_lines = serialize_pretty_value(value, level + 1, child_role);
+        let prefix = format!("{}{}: ", child_indent, json_string(key));
+        raw_entries.push((prefix, value_lines));
+    }
+
+    let mut lines = vec![format!("{}{{", indent)];
+    let mut current: Vec<String> = Vec::new();
+
+    for (pi, (prefix, value_lines)) in raw_entries.iter().enumerate() {
+        let single_line = value_lines.len() == 1;
+        let has_more = pi + 1 < raw_entries.len();
+
+        if single_line {
+            let field = format!("{}{}", prefix, value_lines[0].trim_start());
+            if current.is_empty() {
+                current.push(field);
+                continue;
+            }
+            let candidate_len: usize = current.iter().map(|f| f.len()).sum::<usize>()
+                + current.len() - 1
+                + 2
+                + field.len();
+            if candidate_len <= PRETTY_LINE_MAX {
+                current.push(field);
+                continue;
+            }
+        }
+
+        if !current.is_empty() {
+            let first = &current[0];
+            let rest: Vec<&str> = current[1..].iter().map(|f| {
+                f.strip_prefix(&child_indent).unwrap_or(f.as_str())
+            }).collect();
+            let mut parts: Vec<&str> = Vec::new();
+            parts.push(first);
+            for r in &rest {
+                parts.push(r);
+            }
+            let line = parts.join(", ");
+            lines.push(format!("{},", line));
+            current.clear();
+        }
+
+        if single_line {
+            current.push(format!("{}{}", prefix, value_lines[0].trim_start()));
+        } else {
+            let mut entry_lines: Vec<String> = value_lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    if i == 0 {
+                        format!("{}{}", prefix, line.trim_start())
+                    } else {
+                        line.clone()
+                    }
+                })
+                .collect();
+            if has_more {
+                if let Some(last) = entry_lines.last_mut() {
+                    last.push(',');
+                }
+            }
+            lines.extend(entry_lines);
+        }
+    }
+    if !current.is_empty() {
+        let first = &current[0];
+        let rest: Vec<&str> = current[1..].iter().map(|f| {
+            f.strip_prefix(&child_indent).unwrap_or(f.as_str())
+        }).collect();
+        let mut parts: Vec<&str> = Vec::new();
+        parts.push(first);
+        for r in &rest {
+            parts.push(r);
+        }
+        lines.push(parts.join(", "));
+    }
+    lines.push(format!("{}}}", indent));
+    lines.join("\n")
+}
+
+fn serialize_pretty_value(value: &Value, level: usize, role: CompactRole) -> Vec<String> {
+    match value {
+        Value::Object(object) => {
+            if level > 0 && is_leaf_object(object) {
+                let single = compact_object_one_line(object);
+                let prefix_len = "  ".repeat(level).len() + 2;
+                if single.len() + prefix_len <= PRETTY_LINE_MAX {
+                    return vec![single];
+                }
+            }
+            serialize_pretty(object, level, role)
+                .lines()
+                .map(String::from)
+                .collect()
+        }
+        _ => vec![compact_json_value(value)],
+    }
+}
+
+fn is_leaf_object(object: &Map<String, Value>) -> bool {
+    if object.is_empty() {
+        return true;
+    }
+    object.values().all(|v| {
+        matches!(
+            v,
+            Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null | Value::Array(_)
+        ) || (v.is_object() && v.as_object().map_or(false, |o| o.is_empty()))
+    })
+}
+
+fn compact_object_one_line(object: &Map<String, Value>) -> String {
+    if object.is_empty() {
+        return "{}".into();
+    }
+    let inner: Vec<String> = object
+        .iter()
+        .map(|(k, v)| format!("{}: {}", json_string(k), compact_json_value(v)))
+        .collect();
+    format!("{{ {} }}", inner.join(", "))
 }
 
 fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole) -> String {
@@ -1367,13 +1501,6 @@ fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole
     }
     lines.push(format!("{}}}", indent));
     lines.join("\n")
-}
-
-fn compact_json_minified(root: &Value) -> String {
-    let normalized = strip_variant_settings(root);
-    let mut content = serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".into());
-    content.push('\n');
-    content
 }
 
 fn strip_variant_settings(value: &Value) -> Value {
@@ -1512,6 +1639,30 @@ mod compact_tests {
     use super::*;
 
     #[test]
+    fn pretty_agent_fields_combine_on_same_line() {
+        let root = serde_json::json!({
+            "agent": {
+                "writing": {
+                    "mode": "subagent",
+                    "description": "写技术文档",
+                    "model": "sensenova/sensenova-6.8-flash-lite",
+                    "variant": "high",
+                    "temperature": 0.3,
+                    "color": "info",
+                    "system": "负责文档"
+                }
+            }
+        });
+        let output = pretty_json(&root);
+        println!("=== PRETTY OUTPUT ===\n{}", output);
+        // model, variant, temperature, color should be on the same line
+        assert!(output.contains("\"model\": \"sensenova/sensenova-6.8-flash-lite\", \"variant\": \"high\","),
+            "agent model+variant should combine:\n{}", output);
+        assert!(output.contains("\"temperature\": 0.3, \"color\": \"info\", \"system\": \"负责文档\""),
+            "agent temperature+color+system should combine:\n{}", output);
+    }
+
+    #[test]
     fn compact_variants_use_empty_objects() {
         let value = serde_json::json!({
             "variants": {
@@ -1614,7 +1765,6 @@ assert!(output.contains("\"server\": {\"command\":\"node\",\"args\":[\"server.js
         });
 
         assert!(!compact_json(&root).contains("reasoningEffort"));
-        assert!(!compact_json_minified(&root).contains("reasoningEffort"));
         assert!(compact_json(&root).contains("\"variants\":{\"high\":{}}"));
     }
 }

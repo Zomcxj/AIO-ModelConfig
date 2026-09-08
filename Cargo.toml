@@ -1,11 +1,11 @@
 [package]
-name = "opencode-model-config"
+name = "aio-model-config"
 version = "0.1.1"
 edition = "2021"
 build = "build.rs"
 
 [[bin]]
-name = "opencode-model-config"
+name = "aio-model-config"
 path = "src/main.rs"
 
 [dependencies]

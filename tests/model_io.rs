@@ -1,6 +1,6 @@
-use opencode_model_config::app::load_or_empty;
-use opencode_model_config::model::{AgentRow, ModelRow, ProviderRow};
-use opencode_model_config::util::{is_wsl_path, win_to_wsl};
+use aio_model_config::app::load_or_empty;
+use aio_model_config::model::{AgentRow, ModelRow, ProviderRow};
+use aio_model_config::util::{is_wsl_path, win_to_wsl};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::PathBuf;

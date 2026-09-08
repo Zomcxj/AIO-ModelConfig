@@ -1,8 +1,8 @@
 #![windows_subsystem = "windows"]
 
 use eframe::egui;
-use opencode_model_config::app::App;
-use opencode_model_config::theme::{Radius, Theme};
+use aio_model_config::app::App;
+use aio_model_config::theme::Theme;
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon_rgba.bin");
 const ICON_W: u32 = 256;
@@ -13,14 +13,14 @@ fn main() -> eframe::Result {
     options.viewport = egui::ViewportBuilder::default()
         .with_inner_size([1250.0, 820.0])
         .with_min_inner_size([970.0, 660.0])
-        .with_title("opencode-model-config")
+        .with_title("AIO-ModelConfig")
         .with_icon(egui::IconData { rgba: ICON_BYTES.to_vec(), width: ICON_W, height: ICON_H });
     eframe::run_native(
-        "opencode-model-config",
+        "AIO-ModelConfig",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_fonts(build_cjk_fonts());
-            Theme::default().apply(&cc.egui_ctx, Radius::default());
+            Theme::default().apply(&cc.egui_ctx);
             #[cfg(target_os = "windows")]
             {
                 use raw_window_handle::HasWindowHandle;
@@ -28,7 +28,7 @@ fn main() -> eframe::Result {
                     if let raw_window_handle::RawWindowHandle::Win32(w) = handle.as_raw() {
                         unsafe {
                             let hwnd = w.hwnd.get() as *mut core::ffi::c_void;
-                            opencode_model_config::cursor::init_grabbing_cursor(hwnd);
+                            aio_model_config::cursor::init_grabbing_cursor(hwnd);
                         }
                     }
                 }
