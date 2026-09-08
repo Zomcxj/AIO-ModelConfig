@@ -85,6 +85,9 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
     let mut obj = Map::new();
+    if let Some(compat) = p.raw.get("compat") {
+        obj.insert("compat".into(), compat.clone());
+    }
     if !p.base_url.is_empty() {
         obj.insert("baseUrl".into(), Value::String(p.base_url.clone()));
     }

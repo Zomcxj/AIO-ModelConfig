@@ -169,3 +169,20 @@ fn to_pi_root_preserves_extras() {
     assert_eq!(root["custom_field"], "value");
     assert!(root["providers"].as_object().unwrap().is_empty());
 }
+
+#[test]
+fn provider_to_pi_preserves_compat() {
+    let v = json!({
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-test",
+        "api": "openai-completions",
+        "compat": {
+            "supportsDeveloperRole": false
+        },
+        "models": []
+    });
+    let provider = convert::provider_from_pi("openai", &v);
+    let output = convert::provider_to_pi(&provider);
+    assert!(output.get("compat").is_some());
+    assert_eq!(output["compat"]["supportsDeveloperRole"], false);
+}
