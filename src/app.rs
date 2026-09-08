@@ -48,6 +48,7 @@ pub struct App {
     source_format: ConfigFormat,
     config_paths: ConfigPaths,
     save_target: Option<ConfigFormat>,
+    save_to_current: bool,
     pi_extras: Value,
 }
 
@@ -101,6 +102,7 @@ impl Default for App {
             source_format: format,
             config_paths: paths,
             save_target: None,
+            save_to_current: false,
             pi_extras,
         }
     }
@@ -173,6 +175,7 @@ impl App {
                         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
                         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
                         self.save_target = None;
+                        self.save_to_current = false;
                     }
                 }
                 if ui.button("保存").clicked() {
@@ -195,6 +198,52 @@ impl App {
                     self.save_format = match self.save_format {
                         SaveFormat::Current => SaveFormat::Compact,
                         SaveFormat::Compact => SaveFormat::Current,
+                    };
+                }
+                ui.separator();
+                ui.label("保存到:");
+                let current_selected = self.save_to_current;
+                let current_color = if current_selected {
+                    egui::Color32::from_rgb(100, 200, 100)
+                } else {
+                    ui.visuals().text_color()
+                };
+                if ui.button(egui::RichText::new("当前文件").color(current_color)).clicked() {
+                    self.save_to_current = !self.save_to_current;
+                    if self.save_to_current {
+                        self.save_target = None;
+                    }
+                }
+                let oc_selected = self.save_target == Some(ConfigFormat::Opencode) && !self.save_to_current;
+                let pi_selected = self.save_target == Some(ConfigFormat::PiAgent) && !self.save_to_current;
+                let oc_available = self.config_paths.validate_target(ConfigFormat::Opencode);
+                let pi_available = self.config_paths.validate_target(ConfigFormat::PiAgent);
+                if ui.add_enabled(oc_available, egui::Button::new(
+                    egui::RichText::new("opencode").color(if oc_selected {
+                        egui::Color32::from_rgb(100, 200, 100)
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+                )).clicked() {
+                    self.save_to_current = false;
+                    self.save_target = if oc_selected {
+                        None
+                    } else {
+                        Some(ConfigFormat::Opencode)
+                    };
+                }
+                if ui.add_enabled(pi_available, egui::Button::new(
+                    egui::RichText::new("pi-agent").color(if pi_selected {
+                        egui::Color32::from_rgb(100, 200, 100)
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+                )).clicked() {
+                    self.save_to_current = false;
+                    self.save_target = if pi_selected {
+                        None
+                    } else {
+                        Some(ConfigFormat::PiAgent)
                     };
                 }
             });
@@ -250,38 +299,6 @@ impl App {
                 ui.label(
                     egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
                 );
-                ui.separator();
-                ui.label("保存到:");
-                let oc_selected = self.save_target == Some(ConfigFormat::Opencode);
-                let pi_selected = self.save_target == Some(ConfigFormat::PiAgent);
-                let oc_available = self.config_paths.validate_target(ConfigFormat::Opencode);
-                let pi_available = self.config_paths.validate_target(ConfigFormat::PiAgent);
-                if ui.add_enabled(oc_available, egui::Button::new(
-                    egui::RichText::new("opencode").color(if oc_selected {
-                        egui::Color32::from_rgb(100, 200, 100)
-                    } else {
-                        ui.visuals().text_color()
-                    }),
-                )).clicked() {
-                    self.save_target = if oc_selected {
-                        None
-                    } else {
-                        Some(ConfigFormat::Opencode)
-                    };
-                }
-                if ui.add_enabled(pi_available, egui::Button::new(
-                    egui::RichText::new("pi-agent").color(if pi_selected {
-                        egui::Color32::from_rgb(100, 200, 100)
-                    } else {
-                        ui.visuals().text_color()
-                    }),
-                )).clicked() {
-                    self.save_target = if pi_selected {
-                        None
-                    } else {
-                        Some(ConfigFormat::PiAgent)
-                    };
-                }
             });
         });
     }
@@ -1296,6 +1313,7 @@ impl App {
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
         self.save_target = None;
+        self.save_to_current = false;
         self.status = format!(
             "已加载 ({}): {} agents, {} providers",
             self.source_format.label(),
@@ -1359,6 +1377,10 @@ impl App {
     }
 
     fn save(&mut self) {
+        if self.save_to_current {
+            self.save_to_current_file();
+            return;
+        }
         let target = match self.save_target {
             Some(t) => t,
             None => {
@@ -1379,7 +1401,23 @@ impl App {
         }
     }
 
+    fn save_to_current_file(&mut self) {
+        if self.config_path.is_empty() {
+            self.status = "没有打开的文件".into();
+            return;
+        }
+        match self.source_format {
+            ConfigFormat::Opencode => self.save_opencode_to(&self.config_path.clone()),
+            ConfigFormat::PiAgent => self.save_pi_agent_to(&self.config_path.clone()),
+        }
+    }
+
     fn save_opencode(&mut self) {
+        let path = self.config_paths.target_path(ConfigFormat::Opencode);
+        self.save_opencode_to(&path);
+    }
+
+    fn save_opencode_to(&mut self, path: &str) {
         let mut root = std::mem::take(&mut self.root);
         if let Value::Object(o) = &mut root {
             let mut am = Map::new();
@@ -1404,11 +1442,15 @@ impl App {
             SaveFormat::Compact => compact_json(&root),
         };
 
-        let path = self.config_paths.target_path(ConfigFormat::Opencode);
-        let write_res = if is_wsl_path(&path) {
-            crate::util::write_wsl_file(&path, &content)
+        if let Err(e) = ensure_parent_dir(path) {
+            self.root = root;
+            self.status = format!("保存失败: {}", e);
+            return;
+        }
+        let write_res = if is_wsl_path(path) {
+            crate::util::write_wsl_file(path, &content)
         } else {
-            fs::write(&path, content).map_err(|e| e.to_string())
+            fs::write(path, content).map_err(|e| e.to_string())
         };
         match write_res {
             Ok(()) => {
@@ -1423,6 +1465,11 @@ impl App {
     }
 
     fn save_pi_agent(&mut self) {
+        let path = self.config_paths.target_path(ConfigFormat::PiAgent);
+        self.save_pi_agent_to(&path);
+    }
+
+    fn save_pi_agent_to(&mut self, path: &str) {
         let root = convert::to_pi_root(&self.providers, &self.pi_extras);
 
         let content = match self.save_format {
@@ -1430,12 +1477,11 @@ impl App {
             SaveFormat::Compact => compact_json(&root),
         };
 
-        let path = self.config_paths.target_path(ConfigFormat::PiAgent);
-        if let Err(e) = ensure_parent_dir(&path) {
+        if let Err(e) = ensure_parent_dir(path) {
             self.status = format!("保存失败: {}", e);
             return;
         }
-        let write_res = fs::write(&path, content).map_err(|e| e.to_string());
+        let write_res = fs::write(path, content).map_err(|e| e.to_string());
         match write_res {
             Ok(()) => {
                 self.status = "已保存到 pi-agent".into();
