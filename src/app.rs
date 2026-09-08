@@ -3,7 +3,7 @@ use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
 use crate::ui::{card_frame, card_grid, DragHandle, move_item};
-use crate::util::{is_wsl_path, read_wsl_file, show_file_dialog};
+use crate::util::{ensure_parent_dir, is_wsl_path, read_wsl_file, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -1431,6 +1431,10 @@ impl App {
         };
 
         let path = self.config_paths.target_path(ConfigFormat::PiAgent);
+        if let Err(e) = ensure_parent_dir(&path) {
+            self.status = format!("保存失败: {}", e);
+            return;
+        }
         let write_res = fs::write(&path, content).map_err(|e| e.to_string());
         match write_res {
             Ok(()) => {

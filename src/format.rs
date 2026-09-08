@@ -60,7 +60,14 @@ impl ConfigPaths {
     pub fn validate_target(&self, format: ConfigFormat) -> bool {
         match format {
             ConfigFormat::Opencode => Path::new(&self.opencode).exists(),
-            ConfigFormat::PiAgent => self.pi_agent.exists(),
+            ConfigFormat::PiAgent => {
+                self.pi_agent.exists()
+                    || self
+                        .pi_agent
+                        .parent()
+                        .map(|p| p.exists())
+                        .unwrap_or(false)
+            }
         }
     }
 
