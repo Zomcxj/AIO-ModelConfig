@@ -328,6 +328,101 @@ fn thinking_level_map_asymmetric_roundtrip() {
 }
 
 #[test]
+fn pi_roundtrip_preserves_provider_and_model_extras() {
+    // pi 同格式往返：provider/model 级扩展字段必须保留（不得静默丢弃）
+    let v = json!({
+        "baseUrl": "https://gw/v1",
+        "api": "openai-completions",
+        "apiKey": "k",
+        "authHeader": true,
+        "headers": { "X-Team": "platform" },
+        "models": [
+            {
+                "id": "m1",
+                "name": "M1",
+                "reasoning": true,
+                "input": ["text"],
+                "contextWindow": 200000,
+                "maxTokens": 16384,
+                "toolName": "custom"
+            }
+        ]
+    });
+    let provider = convert::provider_from_pi("gw", &v);
+    let out = convert::provider_to_pi(&provider);
+    assert_eq!(out["authHeader"], json!(true), "provider 扩展字段必须保留");
+    assert_eq!(out["headers"]["X-Team"], json!("platform"));
+    assert_eq!(out["models"][0]["toolName"], json!("custom"), "model 扩展字段必须保留");
+}
+
+#[test]
+fn pi_save_clearing_fields_removes_them() {
+    // raw 基底下清空字段必须删除对应键，而非残留旧值
+    let v = json!({
+        "baseUrl": "https://x/v1",
+        "api": "openai-completions",
+        "models": [
+            { "id": "m", "name": "M", "reasoning": true, "contextWindow": 100, "maxTokens": 50, "input": ["text"] }
+        ]
+    });
+    let mut p = convert::provider_from_pi("p", &v);
+    p.base_url = String::new();
+    p.models[0].name = String::new();
+    p.models[0].context = String::new();
+    p.models[0].output = String::new();
+    p.models[0].modalities_input = String::new();
+    let out = convert::provider_to_pi(&p);
+    assert!(out.get("baseUrl").is_none());
+    assert!(out["models"][0].get("name").is_none());
+    assert!(out["models"][0].get("contextWindow").is_none());
+    assert!(out["models"][0].get("maxTokens").is_none());
+    assert!(out["models"][0].get("input").is_none());
+}
+
+#[test]
+fn pi_save_from_omp_raw_translates_thinking_and_keeps_extras() {
+    // omp raw → pi 输出：thinking 块翻译为 thinkingLevelMap 后移除，其余扩展保留
+    let mut m = model_harbor::model::ModelRow::new();
+    m.id = "m".into();
+    m.reasoning = true;
+    m.variants = "max".into();
+    m.raw = json!({
+        "id": "m",
+        "reasoning": true,
+        "cost": { "input": 3.0 },
+        "thinking": { "mode": "effort", "efforts": ["high"], "effortMap": { "high": "max" } }
+    });
+    let out = convert::model_to_pi(&m);
+    assert_eq!(out["thinkingLevelMap"], json!({"high": "max"}));
+    assert!(out.get("thinking").is_none(), "omp thinking 块必须翻译后移除");
+    assert_eq!(out["cost"]["input"], json!(3.0), "omp 扩展字段应保留");
+}
+
+#[test]
+fn opencode_rows_from_pi_raw_build_fresh() {
+    // pi raw 不得泄漏 api/compat/id/contextWindow/input 等方言键到 opencode 输出
+    let v = json!({
+        "baseUrl": "https://x/v1",
+        "api": "openai-completions",
+        "compat": { "supportsDeveloperRole": false },
+        "models": [
+            { "id": "m", "name": "M", "reasoning": true, "input": ["text"], "contextWindow": 128000, "maxTokens": 4096 }
+        ]
+    });
+    let p = convert::provider_from_pi("p", &v);
+    let out = p.to_value(); // opencode 方言
+    assert!(out.get("api").is_none(), "pi 的 api 键不得泄漏");
+    assert!(out.get("compat").is_none(), "pi 的 compat 键不得泄漏");
+    let m = &out["models"]["m"];
+    assert!(m.get("id").is_none(), "pi 的 id 键不得泄漏（opencode 以 map key 为身份）");
+    assert!(m.get("contextWindow").is_none());
+    assert!(m.get("maxTokens").is_none());
+    assert!(m.get("input").is_none());
+    assert_eq!(m["limit"]["context"], json!(128000), "contextWindow 应翻译为 limit.context");
+    assert_eq!(m["modalities"]["input"][0], json!("text"), "input 应翻译为 modalities.input");
+}
+
+#[test]
 fn anthropic_proxy_url_v1_preserved() {
     let v = json!({
         "baseUrl": "https://my-gateway.example/v1",

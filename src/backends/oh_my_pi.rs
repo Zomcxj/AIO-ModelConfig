@@ -9,13 +9,15 @@
 //! 加载为双方言宽容：`thinking` 与 `thinkingLevelMap` 都能读入 IR variants。
 
 use super::{Backend, BackendLoad};
-use crate::convert;
+use crate::convert::{
+    self, is_opencode_shaped_model, is_opencode_shaped_provider,
+};
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::util::{
     parse_config_content, parse_yaml_content, read_config_content, to_yaml_string, wsl_home,
-    wsl_parent_dir_exists, wsl_path_exists,
 };
+use crate::util::WslPathProbe;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::Path;
@@ -31,21 +33,7 @@ fn default_local_path() -> String {
     format!("{}\\.omp\\agent\\models.yml", home)
 }
 
-/// 判断 raw 是否为 opencode 方言（含 opencode 特征键）。
-fn is_opencode_shaped_model(raw: &Value) -> bool {
-    ["limit", "modalities", "options", "variants"]
-        .iter()
-        .any(|k| raw.get(k).is_some())
-}
-
-fn is_opencode_shaped_provider(raw: &Value) -> bool {
-    raw.get("options").is_some()
-        || raw
-            .get("models")
-            .map(|m| m.is_object())
-            .unwrap_or(false)
-}
-
+/// 判断 raw 是否为 opencode 方言的助手已迁至 convert 模块（pi 后端同样需要）。
 fn string_set(items: impl Iterator<Item = String>) -> HashSet<String> {
     items.collect()
 }
@@ -64,6 +52,8 @@ pub fn model_to_omp(m: &ModelRow) -> Value {
     obj.insert("id".into(), Value::String(m.id.clone()));
     if !m.name.trim().is_empty() {
         obj.insert("name".into(), Value::String(m.name.clone()));
+    } else {
+        obj.remove("name");
     }
     obj.insert("reasoning".into(), Value::Bool(m.reasoning));
     let input: Vec<Value> = m
@@ -73,12 +63,20 @@ pub fn model_to_omp(m: &ModelRow) -> Value {
         .filter(|s| !s.is_empty())
         .map(|s| Value::String(s.to_string()))
         .collect();
-    obj.insert("input".into(), Value::Array(input));
+    if input.is_empty() {
+        obj.remove("input");
+    } else {
+        obj.insert("input".into(), Value::Array(input));
+    }
     if let Ok(ctx) = m.context.parse::<i64>() {
         obj.insert("contextWindow".into(), Value::Number(ctx.into()));
+    } else {
+        obj.remove("contextWindow");
     }
     if let Ok(out) = m.output.parse::<i64>() {
         obj.insert("maxTokens".into(), Value::Number(out.into()));
+    } else {
+        obj.remove("maxTokens");
     }
 
     if m.variants.trim().is_empty() {
@@ -175,9 +173,13 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
             p.base_url.clone()
         };
         obj.insert("baseUrl".into(), Value::String(save_url));
+    } else {
+        obj.remove("baseUrl");
     }
     if !p.api_key.is_empty() {
         obj.insert("apiKey".into(), Value::String(p.api_key.clone()));
+    } else {
+        obj.remove("apiKey");
     }
     obj.insert("api".into(), Value::String(api));
 
@@ -207,10 +209,6 @@ impl Backend for OhMyPiBackend {
         ConfigFormat::OhMyPi
     }
 
-    fn file_ext(&self) -> &'static str {
-        "yml"
-    }
-
     fn default_local_path(&self) -> String {
         default_local_path()
     }
@@ -228,9 +226,9 @@ impl Backend for OhMyPiBackend {
                 .unwrap_or(false)
     }
 
-    fn wsl_available(&self, wsl_path: &str) -> bool {
+    fn wsl_available(&self, probe: WslPathProbe) -> bool {
         // 已安装判定：配置文件或其目录存在
-        wsl_path_exists(wsl_path) || wsl_parent_dir_exists(wsl_path)
+        probe.path_exists || probe.parent_dir_exists
     }
 
     fn detect(&self, content: &str, path: &str) -> bool {
@@ -239,6 +237,10 @@ impl Backend for OhMyPiBackend {
             return false; // JSON 文件归 pi-agent 处理
         }
         let ext_yml = lower.ends_with(".yml") || lower.ends_with(".yaml");
+        // 空内容（新建场景）：仅凭 .yml 扩展名归 omp
+        if content.trim().is_empty() {
+            return ext_yml;
+        }
         // 无扩展名上下文时，JSON 语法内容让位给 pi-agent（JSON 是 YAML 子集）
         if !ext_yml
             && parse_config_content(content)

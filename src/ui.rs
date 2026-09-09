@@ -29,26 +29,10 @@ pub fn card_frame<R>(
         .response
 }
 
-pub fn card_grid(
-    ui: &mut egui::Ui,
-    keys: &[usize],
-    cols: usize,
-    row_gap: f32,
-    mut f: impl FnMut(&mut egui::Ui, usize),
-) {
-    if cols == 1 {
-        for &idx in keys {
-            f(ui, idx);
-            ui.add_space(row_gap);
-        }
-        return;
-    }
-    for chunk in keys.chunks(cols) {
-        ui.columns(cols, |cols_ui| {
-            for (ci, &idx) in chunk.iter().enumerate() {
-                f(&mut cols_ui[ci], idx);
-            }
-        });
+/// 依次渲染卡片列表（每卡片之间附加行间距）。
+pub fn card_list(ui: &mut egui::Ui, keys: &[usize], row_gap: f32, mut f: impl FnMut(&mut egui::Ui, usize)) {
+    for &idx in keys {
+        f(ui, idx);
         ui.add_space(row_gap);
     }
 }
@@ -94,48 +78,22 @@ pub fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     items.insert(to, item);
 }
 
-pub fn editable_combo(
+/// 数字文本编辑框：内容非空且无法解析为数字时红色高亮并悬停提示。
+/// （保存时非法数字字段会被丢弃——这里让用户在丢弃前就看到。）
+pub fn numeric_text_edit(
     ui: &mut egui::Ui,
-    id: impl std::hash::Hash,
-    value: &mut String,
-    options: &[&str],
+    s: &mut String,
     width: f32,
-) {
-    let popup_id = ui.make_persistent_id(id);
-
-    let response = ui.add(
-        egui::TextEdit::singleline(value)
-            .desired_width(width)
-            .hint_text("选择或输入..."),
-    );
-
-    let btn = ui.small_button("▼");
-
-    let show_popup = response.gained_focus() || btn.clicked();
-
-    if show_popup {
-        let filtered: Vec<&&str> = options
-            .iter()
-            .filter(|o| value.is_empty() || o.to_lowercase().contains(&value.to_lowercase()))
-            .collect();
-
-        if !filtered.is_empty() {
-            egui::Area::new(popup_id)
-                .fixed_pos(btn.rect.left_bottom())
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(200.0);
-                        for opt in &filtered {
-                            if ui
-                                .selectable_label(**opt == value.as_str(), opt.to_string())
-                                .clicked()
-                            {
-                                *value = opt.to_string();
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                });
-        }
+    hint: &str,
+) -> egui::Response {
+    let valid = s.trim().is_empty() || crate::util::parse_number_text(s).is_some();
+    let edit = egui::TextEdit::singleline(s)
+        .desired_width(width)
+        .hint_text(hint);
+    if valid {
+        ui.add(edit)
+    } else {
+        ui.add(edit.text_color(egui::Color32::from_rgb(220, 90, 90)))
+            .on_hover_text("无效数字：保存时该字段将被忽略")
     }
 }

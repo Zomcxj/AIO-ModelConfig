@@ -44,7 +44,7 @@ cargo build --release
 - **pi-agent 页**：`baseUrl` / `apiKey` / `api` 下拉（pi KnownApi 10 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinkingLevelMap`（off/minimal…max）
 - **oh-my-pi 页**：`baseUrl` / `apiKey` / `api` 下拉（omp 官方 9 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinking.efforts`（minimal…max）
 
-保存语义：当前文件属于本页格式时写当前文件，否则写该后端默认目标（本地优先、WSL 回落）；跨格式写入采用"先读后合并"，仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留。
+保存语义：当前文件属于本页格式且已加载时写当前文件（整体替换）；手动修改了路径但未点“加载”时，仍写该路径但自动切换为“先读后合并”，不会破坏目标文件已有配置；其余情况写该后端默认目标（本地优先、WSL 回落）。跨格式写入采用“先读后合并”，仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留；保存时不产生空对象污染（空列表、空 `limit`/`options` 省略不写）。
 
 ## 配置文件格式参考
 
@@ -188,4 +188,4 @@ providers:
 - 配置文件中的 `apiKey` 以**明文**读取与写回（与 opencode / pi-agent 本身的存储方式一致），请勿将配置文件提交到公开仓库。
 - 保存到 opencode / pi-agent 目标时采用“先读后合并”策略：仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留。
 - 本地与 WSL 同时存在同名配置时，保存目标**优先本地路径**，仅本地不存在时回落 WSL。
-- 涉及 WSL 的探测 / 读写均通过 `wsl` 命令完成，Windows 下统一附加 `CREATE_NO_WINDOW`，不会闪现终端窗口。
+- 涉及 WSL 的探测均通过 `wsl` 命令完成，Windows 下统一附加 `CREATE_NO_WINDOW`，不会闪现终端窗口；探测结果进程级缓存（一次批量调用探测全部后端，避免重复拉起 `wsl` 进程阻塞 UI）。

@@ -78,8 +78,8 @@ fn target_path_prefers_local_when_exists() {
     std::fs::write(&p, "{}").unwrap();
     let paths = ConfigPaths {
         opencode: p.to_string_lossy().to_string(),
-        pi_agent: p.clone(),
-        oh_my_pi: p.clone(),
+        pi_agent: p.to_string_lossy().to_string(),
+        oh_my_pi: p.to_string_lossy().to_string(),
     };
     assert_eq!(
         paths.target_path(ConfigFormat::Opencode),

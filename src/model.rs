@@ -144,7 +144,13 @@ impl ModelRow {
     }
 
     pub fn to_value(&self) -> Value {
-        let mut m = self.raw.as_object().cloned().unwrap_or_default();
+        // pi/omp 来源全新构造，防止方言键（id/contextWindow/thinking/...）泄漏进 opencode 输出；
+        // 其余以 raw 为基底保留未知字段
+        let mut m = if crate::convert::is_pi_shaped_model(&self.raw) {
+            Map::new()
+        } else {
+            self.raw.as_object().cloned().unwrap_or_default()
+        };
         if self.name.trim().is_empty() {
             m.remove("name");
         } else {
@@ -174,7 +180,12 @@ impl ModelRow {
             .unwrap_or_default();
         set_num_opt(&mut limit, "context", &self.context);
         set_num_opt(&mut limit, "output", &self.output);
-        m.insert("limit".into(), Value::Object(limit));
+        // limit 为空时整体省略，不写 "limit": {}
+        if limit.is_empty() {
+            m.remove("limit");
+        } else {
+            m.insert("limit".into(), Value::Object(limit));
+        }
         let mod_input: Vec<Value> = self
             .modalities_input
             .split(',')
@@ -308,7 +319,13 @@ impl ProviderRow {
 
 
     pub fn to_value(&self) -> Value {
-        let mut m = self.raw.as_object().cloned().unwrap_or_default();
+        // pi/omp 来源全新构造，防止方言键（api/baseUrl/compat/...）泄漏进 opencode 输出；
+        // 其余以 raw 为基底保留未知字段
+        let mut m = if crate::convert::is_pi_shaped_provider(&self.raw) {
+            Map::new()
+        } else {
+            self.raw.as_object().cloned().unwrap_or_default()
+        };
         set_str(&mut m, "description", &self.description);
         set_str(&mut m, "npm", &self.npm);
         let mut options = m
@@ -319,7 +336,12 @@ impl ProviderRow {
         set_str(&mut options, "baseURL", &self.base_url);
         set_str(&mut options, "apiKey", &self.api_key);
         set_num_opt(&mut options, "timeout", &self.timeout);
-        m.insert("options".into(), Value::Object(options));
+        // options 为空时整体省略，不写 "options": {}
+        if options.is_empty() {
+            m.remove("options");
+        } else {
+            m.insert("options".into(), Value::Object(options));
+        }
         let mut models = Map::new();
         for mdl in &self.models {
             models.insert(mdl.id.clone(), mdl.to_value());

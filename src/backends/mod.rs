@@ -15,9 +15,11 @@ pub mod oh_my_pi;
 
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
-use crate::util::{ensure_parent_dir, is_wsl_path};
+use crate::util::{ensure_parent_dir, is_wsl_path, WslPathProbe};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// 一个后端加载结果的完整快照。
 #[derive(Clone)]
@@ -38,9 +40,6 @@ pub trait Backend: Sync {
     /// 唯一标识（对应 ConfigFormat 枚举）。
     fn id(&self) -> ConfigFormat;
 
-    /// 配置文件扩展名（不含点），如 "json" / "yml"。
-    fn file_ext(&self) -> &'static str;
-
     /// 默认本地路径（Windows 风格）。
     fn default_local_path(&self) -> String;
 
@@ -50,8 +49,9 @@ pub trait Backend: Sync {
     /// 本地目标是否可用（一般：文件存在；宽松后端：文件或父目录存在）。
     fn local_available(&self, local_path: &str) -> bool;
 
-    /// WSL 目标是否可用（存在性检查方式由后端决定）。
-    fn wsl_available(&self, wsl_path: &str) -> bool;
+    /// WSL 目标是否可用（已安装判定：配置文件或其目录存在）。
+    /// 旗标由注册表批量探测（单次 `wsl` 调用）后传入，后端自身不拉起进程。
+    fn wsl_available(&self, probe: WslPathProbe) -> bool;
 
     /// 内容判别：该内容是否属于本格式。`path` 提供扩展名上下文（可为空）。
     fn detect(&self, content: &str, path: &str) -> bool;
@@ -113,14 +113,36 @@ pub fn load_backend(id: ConfigFormat, path: &str) -> Result<BackendLoad, String>
 }
 
 /// WSL 目标路径（存在则返回）。
+///
+/// 探测结果进程级缓存（单次批量 `wsl` 调用 + 缓存的 `$HOME`）：
+/// 运行期间在 WSL 侧新装 agent 不会被感知，需重启应用。
 pub fn wsl_target(id: ConfigFormat) -> Option<String> {
-    let b = backend(id);
-    let wsl = b.default_wsl_path()?;
-    if b.wsl_available(&wsl) {
-        Some(wsl)
-    } else {
-        None
+    static CACHE: OnceLock<HashMap<ConfigFormat, Option<String>>> = OnceLock::new();
+    CACHE
+        .get_or_init(probe_wsl_targets)
+        .get(&id)
+        .cloned()
+        .flatten()
+}
+
+/// 一次 `wsl` 调用探测全部后端的默认 WSL 路径，返回“已安装”后端的路径。
+fn probe_wsl_targets() -> HashMap<ConfigFormat, Option<String>> {
+    let mut out = HashMap::new();
+    let entries: Vec<(ConfigFormat, String)> = BACKENDS
+        .iter()
+        .filter_map(|b| b.default_wsl_path().map(|p| (b.id(), p)))
+        .collect();
+    if entries.is_empty() {
+        return out;
     }
+    let paths: Vec<String> = entries.iter().map(|(_, p)| p.clone()).collect();
+    let probes = crate::util::wsl_batch_probe(&paths);
+    for ((id, path), probe) in entries.into_iter().zip(probes) {
+        if backend(id).wsl_available(probe) {
+            out.insert(id, Some(path));
+        }
+    }
+    out
 }
 
 /// 目标是否可用（本地或 WSL）。

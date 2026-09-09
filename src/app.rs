@@ -3,8 +3,8 @@ use crate::convert;
 use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
-use crate::ui::{card_frame, card_grid, DragHandle, move_item};
-use crate::util::{is_wsl_path, show_file_dialog};
+use crate::ui::{card_frame, card_list, move_item, numeric_text_edit, DragHandle};
+use crate::util::{is_wsl_path, parse_number_text, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -32,6 +32,17 @@ struct SaveTarget {
     path: String,
 }
 
+/// 本页写入路径的解析结果。
+#[derive(Clone)]
+enum PageTarget {
+    /// 当前文件（已加载）：整体替换 agent / provider。
+    Current(String),
+    /// 路径已修改但未重新加载：按“先读后合并”写入，不破坏目标文件已有配置。
+    Modified(String),
+    /// 该后端默认目标（本地优先，WSL 回落）。
+    Default(String),
+}
+
 pub struct App {
     root: Value,
     agents: Vec<AgentRow>,
@@ -39,6 +50,8 @@ pub struct App {
     new_agent: AgentRow,
     new_provider: ProviderRow,
     config_path: String,
+    /// 最近一次实际加载的路径（config_path 与之不等时按“未加载”处理，防止误覆盖）。
+    loaded_path: String,
     status: String,
     show_new_agent: bool,
     show_new_provider: bool,
@@ -51,6 +64,8 @@ pub struct App {
     provider_drag_target: Option<String>,
     theme: Theme,
     save_format: SaveFormat,
+    /// 滚轮切换保存格式的门门：一次连续滚动手势只切换一次。
+    save_format_wheel_latch: bool,
     source_format: ConfigFormat,
     config_paths: ConfigPaths,
     targets: Vec<SaveTarget>,
@@ -77,6 +92,7 @@ impl Default for App {
             new_agent: AgentRow::new(),
             new_provider: ProviderRow::new(),
             config_path: path,
+            loaded_path: String::new(),
             status: String::new(),
             show_new_agent: false,
             show_new_provider: false,
@@ -89,6 +105,7 @@ impl Default for App {
             provider_drag_target: None,
             theme: Theme::default(),
             save_format: SaveFormat::default(),
+            save_format_wheel_latch: false,
             source_format: format,
             config_paths: paths,
             targets: Vec::new(),
@@ -153,10 +170,10 @@ impl eframe::App for App {
                 });
         });
         self.paint_drag_ghost(ctx);
+        // 仅拖拽中显示抓取光标（避免任意控件按下时全局变光标）
         let dragging = self.agent_drag_src.is_some() || self.provider_drag_src.is_some();
-        let mouse_down = ctx.input(|i| i.pointer.any_down());
         #[cfg(target_os = "windows")]
-        crate::cursor::set_custom_cursor_active(dragging || mouse_down);
+        crate::cursor::set_custom_cursor_active(dragging);
     }
 }
 
@@ -183,6 +200,7 @@ impl App {
     /// 按 source_format 加载当前 config_path；失败时置空数据并记录 load_error。
     fn apply_load(&mut self) {
         let path = self.config_path.clone();
+        self.loaded_path = path.clone();
         let result = backends::load_backend(self.source_format, &path);
         match result {
             Ok(load) => {
@@ -284,14 +302,27 @@ impl App {
             // 第二行：配置文件 / 保存格式
             ui.horizontal(|ui| {
                 ui.label("配置文件:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.config_path).desired_width(420.0),
-                );
+                let path_resp =
+                    ui.add(egui::TextEdit::singleline(&mut self.config_path).desired_width(420.0));
+                // 回车确认：按当前输入路径重新加载（egui 单行编辑回车即失焦）
+                if path_resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && self.config_path != self.loaded_path
+                {
+                    self.reload();
+                }
+                if ui.button("加载").clicked() {
+                    self.reload();
+                }
                 if ui.button("浏览").clicked() {
                     if let Some(p) = show_file_dialog() {
                         self.config_path = p;
                         self.reload();
                     }
+                }
+                if !self.config_path.is_empty() && self.config_path != self.loaded_path {
+                    ui.label(egui::RichText::new("未加载").small().color(egui::Color32::from_rgb(220, 160, 60)))
+                        .on_hover_text("路径已修改但未加载：保存时将按“先读后合并”写入该路径（不破坏目标文件已有配置）。\n点击“加载”或在此按回车可切换到该文件。");
                 }
                 ui.separator();
                 ui.label("保存格式:");
@@ -299,13 +330,19 @@ impl App {
                 if format_btn.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
+                let hovering = format_btn.hovered();
                 let scroll = ui
                     .input(|i| i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. })));
-                if scroll && format_btn.hovered() {
+                // 滚轮切换：一次连续滚动手势只切换一次，避免快速滚动时来回翻转
+                if hovering && scroll && !self.save_format_wheel_latch {
                     self.save_format = match self.save_format {
                         SaveFormat::Current => SaveFormat::Compact,
                         SaveFormat::Compact => SaveFormat::Current,
                     };
+                    self.save_format_wheel_latch = true;
+                }
+                if !scroll || !hovering {
+                    self.save_format_wheel_latch = false;
                 }
                 if format_btn.clicked() {
                     self.save_format = match self.save_format {
@@ -381,7 +418,7 @@ impl App {
         let mut to_remove: Option<usize> = None;
         let mut to_copy: Option<usize> = None;
         let mut hover_target: Option<String> = None;
-        card_grid(ui, &matched, 1, 0.0, |ui, idx| {
+        card_list(ui, &matched, 0.0, |ui, idx| {
             self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
         });
         if let Some(idx) = to_remove {
@@ -483,14 +520,26 @@ impl App {
     }
 
     fn render_agent_form(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let prev_key = self.agents[idx].key.clone();
+        let other_keys: HashSet<String> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, a)| a.key.trim().to_string())
+            .collect();
         let a = &mut self.agents[idx];
-        let prev_key = a.key.clone();
-        let prev_desc = a.description.clone();
-        let prev_model = a.model.clone();
-        let prev_mode = a.mode.clone();
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
-            ui.add(egui::TextEdit::singleline(&mut a.key).desired_width(120.0));
+            let key_resp = ui.add(egui::TextEdit::singleline(&mut a.key).desired_width(120.0));
+            if !a.key.trim().is_empty() && other_keys.contains(a.key.trim()) {
+                key_resp.on_hover_text("key 与其他 agent 重复，保存将被阻止");
+                ui.label(
+                    egui::RichText::new("⚠ 重复")
+                        .small()
+                        .color(egui::Color32::from_rgb(220, 90, 90)),
+                );
+            }
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("mode").weak()));
             ui.add(egui::TextEdit::singleline(&mut a.mode).desired_width(120.0));
             ui.add_sized(
@@ -564,7 +613,7 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new("temperature").weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut a.temperature).desired_width(120.0));
+            numeric_text_edit(ui, &mut a.temperature, 120.0, "");
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("color").weak()));
             ui.add(egui::TextEdit::singleline(&mut a.color).desired_width(120.0));
             ui.add_sized(
@@ -573,7 +622,10 @@ impl App {
             );
             ui.add(egui::TextEdit::singleline(&mut a.system).desired_width(450.0));
         });
-        if a.key != prev_key || a.description != prev_desc || a.model != prev_model || a.mode != prev_mode {
+        // key 重命名后同步展开状态（避免改名导致卡片收起）
+        let new_key = self.agents[idx].key.clone();
+        if new_key != prev_key {
+            self.sync_agent_rename(&prev_key, &new_key);
         }
     }
 
@@ -670,11 +722,7 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("temperature").weak()),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_agent.temperature)
-                        .hint_text("0.7")
-                        .desired_width(120.0),
-                );
+                numeric_text_edit(ui, &mut self.new_agent.temperature, 120.0, "0.7");
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("color").weak()),
@@ -697,14 +745,17 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_space(60.0);
                 if ui.button("确认").clicked() {
-                    if !self.new_agent.key.trim().is_empty() {
+                    let key = self.new_agent.key.trim().to_string();
+                    if key.is_empty() {
+                        self.status = "请填写 agent key".into();
+                    } else if self.agents.iter().any(|a| a.key.trim() == key) {
+                        self.status = format!("agent key \"{}\" 已存在", key);
+                    } else {
                         let na = self.new_agent.clone();
                         self.agents.push(na);
                         self.new_agent = AgentRow::new();
                         self.show_new_agent = false;
                         self.status = "已添加 agent".into();
-                    } else {
-                        self.status = "请填写 agent key".into();
                     }
                 }
                 if ui.button("取消").clicked() {
@@ -755,7 +806,7 @@ impl App {
         let mut to_remove: Option<usize> = None;
         let mut to_copy: Option<usize> = None;
         let mut hover_target: Option<String> = None;
-        card_grid(ui, &matched, 1, 0.0, |ui, idx| {
+        card_list(ui, &matched, 0.0, |ui, idx| {
             self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
         });
         if let Some(idx) = to_remove {
@@ -857,6 +908,14 @@ impl App {
     }
 
     fn render_provider_form(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let prev_key = self.providers[idx].key.clone();
+        let other_keys: HashSet<String> = self
+            .providers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, p)| p.key.trim().to_string())
+            .collect();
         let p = &mut self.providers[idx];
         let show_oc = self.current_page == ConfigFormat::Opencode;
         let show_omp = self.current_page == ConfigFormat::OhMyPi;
@@ -879,7 +938,15 @@ impl App {
         };
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
-            ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
+            let key_resp = ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
+            if !p.key.trim().is_empty() && other_keys.contains(p.key.trim()) {
+                key_resp.on_hover_text("key 与其他 provider 重复，保存将被阻止");
+                ui.label(
+                    egui::RichText::new("⚠ 重复")
+                        .small()
+                        .color(egui::Color32::from_rgb(220, 90, 90)),
+                );
+            }
             if show_oc {
                 ui.add_sized(
                     [60.0, 24.0],
@@ -984,7 +1051,7 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(timeout_label).weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut p.timeout).desired_width(53.0));
+                numeric_text_edit(ui, &mut p.timeout, 53.0, "");
             }
             if !show_oc {
                 ui.add_sized(
@@ -999,9 +1066,25 @@ impl App {
         ui.strong("Models");
         let mut rm: Option<usize> = None;
         for j in 0..p.models.len() {
+            let other_ids: HashSet<String> = p
+                .models
+                .iter()
+                .enumerate()
+                .filter(|(j2, _)| *j2 != j)
+                .map(|(_, m)| m.id.trim().to_string())
+                .collect();
             ui.horizontal_wrapped(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
-                ui.add(egui::TextEdit::singleline(&mut p.models[j].id).desired_width(120.0));
+                let id_resp =
+                    ui.add(egui::TextEdit::singleline(&mut p.models[j].id).desired_width(120.0));
+                if !p.models[j].id.trim().is_empty() && other_ids.contains(p.models[j].id.trim()) {
+                    id_resp.on_hover_text("id 与同 provider 内其他模型重复，保存将被阻止");
+                    ui.label(
+                        egui::RichText::new("⚠ 重复")
+                            .small()
+                            .color(egui::Color32::from_rgb(220, 90, 90)),
+                    );
+                }
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("name:").weak()),
@@ -1016,12 +1099,12 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(context_label).weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut p.models[j].context).desired_width(53.0));
+                numeric_text_edit(ui, &mut p.models[j].context, 53.0, "");
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(output_label).weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut p.models[j].output).desired_width(53.0));
+                numeric_text_edit(ui, &mut p.models[j].output, 53.0, "");
             });
             ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
@@ -1092,6 +1175,9 @@ impl App {
         }
         if let Some(j) = rm {
             p.models.remove(j);
+            // 删除后下标错位：关闭该 provider 的档位弹窗，避免状态串到其他模型
+            let prefix = format!("variant_open_{}_", p.key);
+            self.variant_open.retain(|k| !k.starts_with(&prefix));
         }
         ui.add_space(2.0);
         let show_new_model_key = format!("show_new_model_{}", p.key);
@@ -1122,12 +1208,12 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(context_label).weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut p.new_model.context).desired_width(53.0));
+                numeric_text_edit(ui, &mut p.new_model.context, 53.0, "");
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(output_label).weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut p.new_model.output).desired_width(53.0));
+                numeric_text_edit(ui, &mut p.new_model.output, 53.0, "");
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -1200,6 +1286,11 @@ impl App {
                     self.variant_open.remove(&show_new_model_key);
                 }
             });
+        }
+        // key 重命名后同步展开状态与弹窗键
+        let new_key = self.providers[idx].key.clone();
+        if new_key != prev_key {
+            self.sync_provider_rename(&prev_key, &new_key);
         }
     }
 
@@ -1344,11 +1435,7 @@ impl App {
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(timeout_label).weak()),
                     );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_provider.timeout)
-                            .hint_text("180000")
-                            .desired_width(53.0),
-                    );
+                    numeric_text_edit(ui, &mut self.new_provider.timeout, 53.0, "180000");
                 }
                 if !show_oc {
                     ui.add_sized(
@@ -1379,12 +1466,12 @@ impl App {
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(context_label).weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].context).desired_width(53.0));
+                    numeric_text_edit(ui, &mut self.new_provider.models[j].context, 53.0, "");
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(output_label).weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].output).desired_width(53.0));
+                    numeric_text_edit(ui, &mut self.new_provider.models[j].output, 53.0, "");
                     if ui.button("删").clicked() {
                         rm_new = Some(j);
                     }
@@ -1421,12 +1508,12 @@ impl App {
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(context_label).weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.context).desired_width(53.0));
+                    numeric_text_edit(ui, &mut self.new_provider.new_model.context, 53.0, "");
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(output_label).weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.output).desired_width(53.0));
+                    numeric_text_edit(ui, &mut self.new_provider.new_model.output, 53.0, "");
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.add_sized(
@@ -1452,18 +1539,28 @@ impl App {
                         current_variants.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
                     };
                     let display = if selected_variants.is_empty() { "选择..." } else { &current_variants };
-                    let _ = ui.button(display);
-                    for vn in variant_names {
-                        let mut checked = selected_variants.contains(&vn.to_string());
-                        if ui.checkbox(&mut checked, *vn).changed() {
-                            if checked {
-                                if !selected_variants.contains(&vn.to_string()) {
-                                    selected_variants.push(vn.to_string());
+                    let popup_key = "new_provider_new_model_variant".to_string();
+                    let is_open = self.variant_open.contains(&popup_key);
+                    if ui.button(display).clicked() {
+                        if is_open {
+                            self.variant_open.remove(&popup_key);
+                        } else {
+                            self.variant_open.insert(popup_key.clone());
+                        }
+                    }
+                    if is_open {
+                        for vn in variant_names {
+                            let mut checked = selected_variants.contains(&vn.to_string());
+                            if ui.checkbox(&mut checked, *vn).changed() {
+                                if checked {
+                                    if !selected_variants.contains(&vn.to_string()) {
+                                        selected_variants.push(vn.to_string());
+                                    }
+                                } else {
+                                    selected_variants.retain(|s| s != vn);
                                 }
-                            } else {
-                                selected_variants.retain(|s| s != vn);
+                                self.new_provider.new_model.variants = selected_variants.join(", ");
                             }
-                            self.new_provider.new_model.variants = selected_variants.join(", ");
                         }
                     }
                 });
@@ -1483,14 +1580,17 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_space(60.0);
                 if ui.button("确认").clicked() {
-                    if !self.new_provider.key.trim().is_empty() {
+                    let key = self.new_provider.key.trim().to_string();
+                    if key.is_empty() {
+                        self.status = "请填写 provider key".into();
+                    } else if self.providers.iter().any(|p| p.key.trim() == key) {
+                        self.status = format!("provider key \"{}\" 已存在", key);
+                    } else {
                         let np = self.new_provider.clone();
                         self.providers.push(np);
                         self.new_provider = ProviderRow::new();
                         self.show_new_provider = false;
                         self.status = "已添加 provider".into();
-                    } else {
-                        self.status = "请填写 provider key".into();
                     }
                 }
                 if ui.button("取消").clicked() {
@@ -1561,6 +1661,57 @@ impl App {
         );
     }
 
+    /// agent key 重命名后同步 UI 状态（卡片展开集合），避免改名后卡片收起。
+    fn sync_agent_rename(&mut self, old: &str, new: &str) {
+        if old == new || new.is_empty() {
+            return;
+        }
+        if self.agent_open.remove(old) {
+            self.agent_open.insert(new.to_string());
+        }
+    }
+
+    /// provider key 重命名后同步 UI 状态（展开集合 + 弹窗键）。
+    fn sync_provider_rename(&mut self, old: &str, new: &str) {
+        if old == new || new.is_empty() {
+            return;
+        }
+        if self.provider_open.remove(old) {
+            self.provider_open.insert(new.to_string());
+        }
+        // 下标型弹窗键直接关闭（避免前缀歧义），需要时重新打开即可
+        let variant_prefix = format!("variant_open_{}_", old);
+        let show_key = format!("show_new_model_{}", old);
+        let new_variant_key = format!("new_model_variant_{}", old);
+        self.variant_open.retain(|k| {
+            !k.starts_with(&variant_prefix) && k != &show_key && k != &new_variant_key
+        });
+    }
+
+    /// 统计非法数字字段数（非空且解析失败），保存后提示用户它们被忽略。
+    fn count_invalid_numeric_fields(&self) -> usize {
+        fn bad(s: &str) -> bool {
+            !s.trim().is_empty() && parse_number_text(s).is_none()
+        }
+        let mut n = 0;
+        for a in &self.agents {
+            if bad(&a.temperature) {
+                n += 1;
+            }
+        }
+        for p in &self.providers {
+            if bad(&p.timeout) {
+                n += 1;
+            }
+            for m in &p.models {
+                if bad(&m.context) || bad(&m.output) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// 校验 agent / provider / model key 唯一性，返回首个冲突描述。
     fn find_duplicate_keys(&self) -> Option<String> {
         let mut seen = HashSet::new();
@@ -1590,11 +1741,17 @@ impl App {
         None
     }
 
-    /// 本页写入路径：当前文件属于本页格式时写当前文件，否则写该后端默认目标
-    /// （本地优先，WSL 回落）。
-    fn page_save_path(&self, fmt: ConfigFormat) -> (String, bool) {
+    /// 本页写入路径：
+    /// - 当前文件属于本页格式且已加载 → 当前文件（整体替换）；
+    /// - 路径已修改但未加载 → 仍写该路径，但按“先读后合并”（防止覆盖目标文件已有配置）；
+    /// - 其余 → 该后端默认目标（本地优先，WSL 回落）。
+    fn page_save_path(&self, fmt: ConfigFormat) -> PageTarget {
         if self.source_format == fmt && !self.config_path.is_empty() {
-            (self.config_path.clone(), true)
+            if self.config_path == self.loaded_path {
+                PageTarget::Current(self.config_path.clone())
+            } else {
+                PageTarget::Modified(self.config_path.clone())
+            }
         } else {
             let path = self
                 .targets
@@ -1602,7 +1759,7 @@ impl App {
                 .find(|t| t.backend == fmt)
                 .map(|t| t.path.clone())
                 .unwrap_or_default();
-            (path, false)
+            PageTarget::Default(path)
         }
     }
 
@@ -1610,9 +1767,15 @@ impl App {
     fn ui_page_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let fmt = self.current_page;
-            let (path, is_current) = self.page_save_path(fmt);
-            let target_ok = self.targets.iter().any(|t| t.backend == fmt && t.available);
-            let can_save = is_current || target_ok;
+            let target = self.page_save_path(fmt);
+            let (path, kind, can_save) = match &target {
+                PageTarget::Current(p) => (p.clone(), "当前文件（agent/provider 整体替换）", true),
+                PageTarget::Modified(p) => (p.clone(), "路径已修改未加载：先读后合并写入", true),
+                PageTarget::Default(p) => {
+                    let ok = self.targets.iter().any(|t| t.backend == fmt && t.available);
+                    (p.clone(), "默认目标（本地优先，WSL 回落）", ok)
+                }
+            };
             if ui
                 .add_enabled(
                     can_save,
@@ -1624,11 +1787,6 @@ impl App {
             {
                 self.save_page(fmt);
             }
-            let kind = if is_current {
-                "当前文件"
-            } else {
-                "默认目标（本地优先，WSL 回落）"
-            };
             if let Some(icon) = self.icon_for(fmt) {
                 ui.add(
                     egui::Image::from_texture(icon)
@@ -1639,6 +1797,15 @@ impl App {
                 egui::RichText::new(format!("写入: {}", path)).weak(),
             )
             .on_hover_text(kind);
+            // 该格式不支持的区块提前提示，避免保存后才发现数据没写入
+            if fmt != ConfigFormat::Opencode && !self.agents.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("⚠ {} 个 agents 不会写入该格式", self.agents.len()))
+                        .small()
+                        .color(egui::Color32::from_rgb(220, 160, 60)),
+                )
+                .on_hover_text("该格式不支持 agent 定义，保存时将忽略");
+            }
         });
         ui.separator();
     }
@@ -1649,18 +1816,27 @@ impl App {
             self.status = format!("key 重复: {}，已取消保存", dup);
             return;
         }
-        let (path, is_current) = self.page_save_path(fmt);
-        if is_current {
-            if let Some(err) = self.load_error.clone() {
-                self.status = format!("当前文件: 加载失败({})，已跳过", err);
-                return;
+        let target = self.page_save_path(fmt);
+        let path = match &target {
+            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => p.clone(),
+        };
+        match &target {
+            PageTarget::Current(_) => {
+                if let Some(err) = self.load_error.clone() {
+                    self.status = format!("当前文件: 加载失败({})，已跳过", err);
+                    return;
+                }
             }
-        } else if !self.targets.iter().any(|t| t.backend == fmt && t.available) {
-            self.status = format!(
-                "{}: 未安装（本地与 WSL 均未找到配置）",
-                fmt.label()
-            );
-            return;
+            PageTarget::Default(_) => {
+                if !self.targets.iter().any(|t| t.backend == fmt && t.available) {
+                    self.status = format!(
+                        "{}: 未安装（本地与 WSL 均未找到配置）",
+                        fmt.label()
+                    );
+                    return;
+                }
+            }
+            PageTarget::Modified(_) => {}
         }
         let res = self.save_backend_to(fmt, &path);
         let ok = res.is_ok();
@@ -1668,6 +1844,18 @@ impl App {
             Ok(()) => format!("{}: 已保存", fmt.label()),
             Err(e) => format!("{}: 保存失败({})", fmt.label(), e),
         };
+        if ok {
+            // 该格式不支持 agents 时明确告知，避免误以为已写入
+            if fmt != ConfigFormat::Opencode && !self.agents.is_empty() {
+                self.status
+                    .push_str(&format!("（{} 个 agents 未写入：该格式不支持）", self.agents.len()));
+            }
+            let bad = self.count_invalid_numeric_fields();
+            if bad > 0 {
+                self.status
+                    .push_str(&format!("（已忽略 {} 个无效数字字段）", bad));
+            }
+        }
         // WSL 同步：写入路径为本地时，同步到 WSL 侧默认路径（仅 WSL 中已安装的 agent）
         if self.sync_wsl && ok && !is_wsl_path(&path) {
             if let Some(wsl_path) = backends::wsl_target(fmt) {
@@ -1686,7 +1874,8 @@ impl App {
     /// 通用保存：按后端构造 root、渲染内容并写入。
     fn save_backend_to(&mut self, fmt: ConfigFormat, path: &str) -> Result<(), String> {
         let backend = backends::backend(fmt);
-        let is_current = path == self.config_path;
+        // 仅“已加载的当前文件”允许整体替换；其余目标（含已修改未加载的路径）一律先读后合并
+        let is_current = path == self.loaded_path;
         let target_root: Option<Value> = if is_current {
             None
         } else {
@@ -1952,7 +2141,7 @@ fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole
 /// 读取配置文件内容；本地与 WSL 路径统一处理，文件不存在视为新建场景返回空串。
 // —— 兼容再导出：实现迁移至 util / backends，保持既有测试路径可用 ——
 pub use crate::backends::opencode::merge_opencode_root;
-pub use crate::util::{parse_config_content, read_config_content};
+pub use crate::util::parse_config_content;
 
 /// 加载 opencode 配置；读取/解析失败返回 Err。
 pub fn load_opencode_result(
@@ -2072,7 +2261,6 @@ fn serialize_fields(object: &Map<String, Value>, level: usize, role: CompactRole
         } else {
             compact_json_value(value)
         };
-        let prefix = format!("{}: ", json_string(key));
 
         if field_indent.chars().count() + prefix.chars().count() + single.chars().count() <= 150 {
             let field = format!("{}{}", prefix, single);

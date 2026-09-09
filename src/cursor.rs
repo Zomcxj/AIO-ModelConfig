@@ -26,7 +26,7 @@ fn debug_log(msg: &str) {
     let guard = DEBUG_FILE.get_or_init(|| std::sync::Mutex::new(None));
     let mut lock = guard.lock().unwrap();
     if lock.is_none() {
-        let path = std::env::temp_dir().join("opencode_cursor_debug.log");
+        let path = std::env::temp_dir().join("model_harbor_cursor_debug.log");
         *lock = std::fs::File::create(path).ok();
     }
     if let Some(ref mut f) = *lock {

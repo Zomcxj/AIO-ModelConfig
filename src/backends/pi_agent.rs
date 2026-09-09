@@ -7,7 +7,7 @@ use crate::convert;
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
 use crate::util::{
-    parse_config_content, read_config_content, wsl_home, wsl_parent_dir_exists, wsl_path_exists,
+    parse_config_content, read_config_content, wsl_home, WslPathProbe,
 };
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -28,10 +28,6 @@ impl Backend for PiAgentBackend {
         ConfigFormat::PiAgent
     }
 
-    fn file_ext(&self) -> &'static str {
-        "json"
-    }
-
     fn default_local_path(&self) -> String {
         default_local_path()
     }
@@ -49,9 +45,9 @@ impl Backend for PiAgentBackend {
                 .unwrap_or(false)
     }
 
-    fn wsl_available(&self, wsl_path: &str) -> bool {
+    fn wsl_available(&self, probe: WslPathProbe) -> bool {
         // 已安装判定：配置文件或其目录存在
-        wsl_path_exists(wsl_path) || wsl_parent_dir_exists(wsl_path)
+        probe.path_exists || probe.parent_dir_exists
     }
 
     fn detect(&self, content: &str, _path: &str) -> bool {

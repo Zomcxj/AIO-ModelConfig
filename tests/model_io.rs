@@ -300,6 +300,24 @@ fn model_variants_raw_values_preserved() {
 }
 
 #[test]
+fn model_limit_omitted_when_empty() {
+    // 空上下文/输出限制不得写入 "limit": {} 污染配置
+    let v = json!({ "name": "m", "reasoning": false, "tool_call": false });
+    let model = ModelRow::from("m", &v);
+    let out = model.to_value();
+    assert!(out.get("limit").is_none(), "empty limit must be omitted");
+}
+
+#[test]
+fn provider_options_omitted_when_empty() {
+    // 无 baseURL/apiKey/timeout 时不得写入 "options": {} 污染配置
+    let v = json!({ "npm": "@ai-sdk/openai", "models": {} });
+    let provider = ProviderRow::from("p", &v);
+    let out = provider.to_value();
+    assert!(out.get("options").is_none(), "empty options must be omitted");
+}
+
+#[test]
 fn load_opencode_result_invalid_json_is_err() {
     let path = tmp_path("invalid_json");
     fs::write(&path, "{ not valid json !!!").unwrap();
@@ -310,7 +328,7 @@ fn load_opencode_result_invalid_json_is_err() {
 
 #[test]
 fn load_opencode_result_nonexistent_is_ok_empty() {
-    let res = load_opencode_result("C:\nonexistent_opencode_test_12345.json");
+    let res = load_opencode_result("C:\\nonexistent_opencode_test_12345.json");
     assert!(res.is_ok(), "nonexistent path is a valid new-file scenario");
     let (v, agents, providers) = res.unwrap();
     assert!(v.as_object().unwrap().is_empty());

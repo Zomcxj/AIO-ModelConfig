@@ -3,6 +3,50 @@ use crate::util::{bool_at, nested_list_str, num_at, str_at};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
+/// 判断 raw 是否为 opencode 方言（含 opencode 特征键）。
+/// pi / omp 输出时以此为界：opencode 形状全新构造，其余以 raw 为基底保留扩展字段。
+pub(crate) fn is_opencode_shaped_model(raw: &Value) -> bool {
+    ["limit", "modalities", "options", "variants"]
+        .iter()
+        .any(|k| raw.get(k).is_some())
+}
+
+pub(crate) fn is_opencode_shaped_provider(raw: &Value) -> bool {
+    raw.get("options").is_some()
+        || raw
+            .get("models")
+            .map(|m| m.is_object())
+            .unwrap_or(false)
+}
+
+/// 判断 raw 是否为 pi / omp 方言（含 pi 特征键）。
+/// opencode 输出时以此为界：pi 形状全新构造，防止方言键泄漏。
+pub(crate) fn is_pi_shaped_model(raw: &Value) -> bool {
+    [
+        "id",
+        "input",
+        "contextWindow",
+        "maxTokens",
+        "thinkingLevelMap",
+        "thinking",
+    ]
+    .iter()
+    .any(|k| raw.get(k).is_some())
+}
+
+pub(crate) fn is_pi_shaped_provider(raw: &Value) -> bool {
+    raw.get("baseUrl").is_some()
+        || raw.get("api").is_some()
+        || raw.get("compat").is_some()
+        || raw.get("authHeader").is_some()
+        || raw.get("headers").is_some()
+        || raw.get("discovery").is_some()
+        || raw
+            .get("models")
+            .map(|m| m.is_array())
+            .unwrap_or(false)
+}
+
 /// 仅对 Anthropic 官方端点做 /v1 归一化；自定义代理 URL 原样保留。
 pub(crate) fn is_official_anthropic_url(url: &str) -> bool {
     let u = url.trim_end_matches('/');
@@ -81,10 +125,19 @@ pub fn model_from_pi(v: &Value) -> ModelRow {
 }
 
 pub fn model_to_pi(m: &ModelRow) -> Value {
-    let mut obj = Map::new();
+    // opencode 来源全新构造；pi/omp 来源以 raw 为基底保留扩展字段（cost/toolName 等）
+    let mut obj: Map<String, Value> = if is_opencode_shaped_model(&m.raw) {
+        Map::new()
+    } else {
+        m.raw.as_object().cloned().unwrap_or_default()
+    };
+    // omp 方言的 thinking 块由 thinkingLevelMap 表达，翻译后移除
+    obj.remove("thinking");
     obj.insert("id".into(), Value::String(m.id.clone()));
     if !m.name.trim().is_empty() {
         obj.insert("name".into(), Value::String(m.name.clone()));
+    } else {
+        obj.remove("name");
     }
     obj.insert("reasoning".into(), Value::Bool(m.reasoning));
     let input: Vec<Value> = m
@@ -94,68 +147,78 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
         .filter(|s| !s.is_empty())
         .map(|s| Value::String(s.to_string()))
         .collect();
-    obj.insert("input".into(), Value::Array(input));
+    if input.is_empty() {
+        obj.remove("input");
+    } else {
+        obj.insert("input".into(), Value::Array(input));
+    }
     if let Ok(ctx) = m.context.parse::<i64>() {
         obj.insert("contextWindow".into(), Value::Number(ctx.into()));
+    } else {
+        obj.remove("contextWindow");
     }
     if let Ok(out) = m.output.parse::<i64>() {
         obj.insert("maxTokens".into(), Value::Number(out.into()));
+    } else {
+        obj.remove("maxTokens");
     }
-    if !m.variants.trim().is_empty() {
-        let names: Vec<&str> = m
-            .variants
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let cur: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
-        let thinking_map: Map<String, Value> =
-            // 1) pi 方言原样保留：raw.thinkingLevelMap 值集合与当前选择一致
-            //    （保护 {"high":"max"} 这类非对称映射的键）
-            if let Some(rm) = m.raw.get("thinkingLevelMap").and_then(|v| v.as_object()) {
-                let rm_vals: HashSet<String> = rm
-                    .values()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect();
-                if rm_vals == cur {
-                    rm.clone()
-                } else {
-                    Map::new()
-                }
-            }
-            // 2) omp 方言翻译：raw.thinking.effortMap 值集合一致 → 直接作为 thinkingLevelMap
-            else if let Some(em) = m
-                .raw
-                .get("thinking")
-                .and_then(|t| t.get("effortMap"))
-                .and_then(|v| v.as_object())
-            {
-                let em_vals: HashSet<String> = em
-                    .values()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect();
-                if em_vals == cur {
-                    em.clone()
-                } else {
-                    Map::new()
-                }
+    if m.variants.trim().is_empty() {
+        obj.remove("thinkingLevelMap");
+        return Value::Object(obj);
+    }
+    let names: Vec<&str> = m
+        .variants
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let cur: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+    let thinking_map: Map<String, Value> =
+        // 1) pi 方言原样保留：raw.thinkingLevelMap 值集合与当前选择一致
+        //    （保护 {"high":"max"} 这类非对称映射的键）
+        if let Some(rm) = m.raw.get("thinkingLevelMap").and_then(|v| v.as_object()) {
+            let rm_vals: HashSet<String> = rm
+                .values()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect();
+            if rm_vals == cur {
+                rm.clone()
             } else {
                 Map::new()
-            };
-        // 都不匹配 → 对称映射 {档位: 档位}
-        let thinking_map = if thinking_map.is_empty() {
-            names
-                .iter()
-                .map(|n| (n.to_string(), Value::String(n.to_string())))
-                .collect()
-        } else {
-            thinking_map
-        };
-        if !thinking_map.is_empty() {
-            obj.insert("thinkingLevelMap".into(), Value::Object(thinking_map));
+            }
         }
+        // 2) omp 方言翻译：raw.thinking.effortMap 值集合一致 → 直接作为 thinkingLevelMap
+        else if let Some(em) = m
+            .raw
+            .get("thinking")
+            .and_then(|t| t.get("effortMap"))
+            .and_then(|v| v.as_object())
+        {
+            let em_vals: HashSet<String> = em
+                .values()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect();
+            if em_vals == cur {
+                em.clone()
+            } else {
+                Map::new()
+            }
+        } else {
+            Map::new()
+        };
+    // 都不匹配 → 对称映射 {档位: 档位}
+    let thinking_map = if thinking_map.is_empty() {
+        names
+            .iter()
+            .map(|n| (n.to_string(), Value::String(n.to_string())))
+            .collect()
+    } else {
+        thinking_map
+    };
+    if !thinking_map.is_empty() {
+        obj.insert("thinkingLevelMap".into(), Value::Object(thinking_map));
     }
     Value::Object(obj)
 }
@@ -191,12 +254,26 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
 }
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
-    let mut obj = Map::new();
+    // opencode 来源全新构造；pi/omp 来源以 raw 为基底保留扩展字段（headers/auth 等）
+    let mut obj: Map<String, Value> = if is_opencode_shaped_provider(&p.raw) {
+        Map::new()
+    } else {
+        p.raw.as_object().cloned().unwrap_or_default()
+    };
+    // compat 仅管理 supportsDeveloperRole，其余键（maxTokensField/extraBody/...）保留
     if !p.compat {
-        obj.insert(
-            "compat".into(),
-            serde_json::json!({"supportsDeveloperRole": false}),
-        );
+        let mut c = obj
+            .get("compat")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        c.insert("supportsDeveloperRole".into(), Value::Bool(false));
+        obj.insert("compat".into(), Value::Object(c));
+    } else if let Some(c) = obj.get_mut("compat").and_then(|v| v.as_object_mut()) {
+        c.remove("supportsDeveloperRole");
+        if c.is_empty() {
+            obj.remove("compat");
+        }
     }
     let api = if !p.npm.is_empty() {
         npm_to_api(&p.npm)
@@ -212,9 +289,13 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
             p.base_url.clone()
         };
         obj.insert("baseUrl".into(), Value::String(save_url));
+    } else {
+        obj.remove("baseUrl");
     }
     if !p.api_key.is_empty() {
         obj.insert("apiKey".into(), Value::String(p.api_key.clone()));
+    } else {
+        obj.remove("apiKey");
     }
     obj.insert("api".into(), Value::String(api));
     let models: Vec<Value> = p.models.iter().map(model_to_pi).collect();

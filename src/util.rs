@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// 构造 wsl 命令：Windows 下带 CREATE_NO_WINDOW，
 /// 避免 GUI 程序拉起控制台进程（wsl.exe）时闪现终端窗口。
@@ -24,10 +25,25 @@ pub fn bool_at(v: &Value, k: &str) -> bool {
 }
 
 pub fn num_at(v: &Value, k: &str) -> String {
-    v.get(k)
-        .and_then(|x| x.as_f64().or_else(|| x.as_i64().map(|i| i as f64)))
-        .map(|n| n.to_string())
-        .unwrap_or_default()
+    v.get(k).map(number_text).unwrap_or_default()
+}
+
+/// JSON 数字 → 文本：优先 i64/u64 精确表示，避免大整数经 f64 丢精度。
+fn number_text(v: &Value) -> String {
+    match v.as_number() {
+        Some(n) => {
+            if let Some(i) = n.as_i64() {
+                i.to_string()
+            } else if let Some(u) = n.as_u64() {
+                u.to_string()
+            } else if let Some(f) = n.as_f64() {
+                f.to_string()
+            } else {
+                String::new()
+            }
+        }
+        None => String::new(),
+    }
 }
 
 pub fn nested_str<'a>(v: &'a Value, path: &[&str]) -> &'a str {
@@ -49,10 +65,7 @@ pub fn nested_num(v: &Value, path: &[&str]) -> String {
             None => return String::new(),
         }
     }
-    cur.as_f64()
-        .or_else(|| cur.as_i64().map(|i| i as f64))
-        .map(|n| n.to_string())
-        .unwrap_or_default()
+    number_text(cur)
 }
 
 pub fn nested_list_str(v: &Value, path: &[&str]) -> String {
@@ -116,25 +129,6 @@ pub fn parse_number_text(v: &str) -> Option<Value> {
     None
 }
 
-pub fn default_config_path() -> Option<String> {
-    if let Ok(p) = std::env::var("OPENCODE_CONFIG_PATH") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    let base = format!("{}\\.config\\opencode", home);
-    for f in ["opencode.json", "opencode.jsonc"] {
-        let p = format!("{}\\{}", base, f);
-        if Path::new(&p).exists() {
-            return Some(p);
-        }
-    }
-    Some(format!("{}\\opencode.json", base))
-}
-
 pub fn ensure_parent_dir(path: &str) -> Result<(), String> {
     let p = Path::new(path);
     if let Some(parent) = p.parent() {
@@ -149,38 +143,94 @@ pub fn is_wsl_path(path: &str) -> bool {
     path.starts_with('/') && !path.contains(':')
 }
 
+/// WSL 默认发行版的 $HOME（进程级缓存：每次 `wsl` 调用约需数百毫秒，不可重复探测）。
 pub fn wsl_home() -> Option<String> {
-    let out = wsl_command()
-        .args(["-e", "sh", "-c", "printf %s \"$HOME\""])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let home = String::from_utf8(out.stdout).unwrap_or_default().trim().to_string();
-    if home.is_empty() {
-        None
-    } else {
-        Some(home)
-    }
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let out = wsl_command()
+                .args(["-e", "sh", "-c", "printf %s \"$HOME\""])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let home = String::from_utf8(out.stdout)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if home.is_empty() {
+                None
+            } else {
+                Some(home)
+            }
+        })
+        .clone()
 }
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\\\''"))
 }
 
-pub fn wsl_path_exists(path: &str) -> bool {
-    let out = wsl_command()
-        .args(["-e", "sh", "-c", &format!("test -e {} && echo y", shell_quote(path))])
-        .output();
-    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
+/// WSL 批量探测的单项结果。
+#[derive(Clone, Copy, Default, Debug)]
+pub struct WslPathProbe {
+    /// `test -f`：路径是常规文件。
+    pub file_exists: bool,
+    /// `test -e`：路径存在（任意类型，含文件）。
+    pub path_exists: bool,
+    /// 父目录存在（"已安装" 判定的宽松条件）。
+    pub parent_dir_exists: bool,
 }
 
-pub fn wsl_file_exists(path: &str) -> bool {
-    let out = wsl_command()
-        .args(["-e", "sh", "-c", &format!("test -f {} && echo y", shell_quote(path))])
-        .output();
-    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
+/// 单次 `wsl` 调用批量探测多个路径的存在状态。
+/// 每项依次输出 `F`（文件）/ `E`（存在非文件）/ `P`（父目录存在）/ `N`（均不存在）。
+pub fn wsl_batch_probe(paths: &[String]) -> Vec<WslPathProbe> {
+    let fallback = || vec![WslPathProbe::default(); paths.len()];
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let mut script = String::from("for p in");
+    for p in paths {
+        script.push(' ');
+        script.push_str(&shell_quote(p));
+    }
+    script.push_str(
+        "; do if [ -f \"$p\" ]; then echo F; \
+         elif [ -e \"$p\" ]; then echo E; \
+         elif [ -d \"${p%/*}\" ]; then echo P; \
+         else echo N; fi; done",
+    );
+    let out = match wsl_command().args(["-e", "sh", "-c", &script]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return fallback(),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut result = Vec::with_capacity(paths.len());
+    for line in stdout.lines().take(paths.len()) {
+        result.push(match line.trim() {
+            "F" => WslPathProbe {
+                file_exists: true,
+                path_exists: true,
+                parent_dir_exists: true,
+            },
+            "E" => WslPathProbe {
+                file_exists: false,
+                path_exists: true,
+                parent_dir_exists: true,
+            },
+            "P" => WslPathProbe {
+                file_exists: false,
+                path_exists: false,
+                parent_dir_exists: true,
+            },
+            _ => WslPathProbe::default(),
+        });
+    }
+    if result.len() != paths.len() {
+        return fallback();
+    }
+    result
 }
 
 pub fn win_to_wsl(path: &str) -> String {
@@ -206,9 +256,17 @@ pub fn read_wsl_file(path: &str) -> Result<String, String> {
     String::from_utf8(out.stdout).map_err(|e| format!("读取失败: {}", e))
 }
 
+/// WSL 侧路径是否为常规文件（单次探测，用于按需读取前的存在性检查）。
+pub fn wsl_file_exists(path: &str) -> bool {
+    let out = wsl_command()
+        .args(["-e", "sh", "-c", &format!("test -f {} && echo y", shell_quote(path))])
+        .output();
+    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
+}
+
 pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
     let tmp: PathBuf = std::env::temp_dir().join(format!(
-        "opencode_config_tmp_{}.json",
+        "model_harbor_tmp_{}.json",
         std::process::id()
     ));
     fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
@@ -350,15 +408,4 @@ pub fn parse_yaml_content(content: &str) -> Result<serde_json::Value, String> {
 /// 将 Value 序列化为块风格 YAML 文本。
 pub fn to_yaml_string(value: &serde_json::Value) -> Result<String, String> {
     serde_yaml_ng::to_string(value).map_err(|e| format!("序列化失败: {}", e))
-}
-
-/// WSL 侧路径的父目录是否存在（"已安装" 判定：配置文件或其目录存在即可）。
-pub fn wsl_parent_dir_exists(path: &str) -> bool {
-    let Some((dir, _)) = path.rsplit_once('/') else {
-        return false;
-    };
-    let out = wsl_command()
-        .args(["-e", "sh", "-c", &format!("test -d {} && echo y", shell_quote(dir))])
-        .output();
-    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }

@@ -1,7 +1,7 @@
 //! 后端注册表架构回归：detect / parse / serialize_root 全管线。
 
 use model_harbor::backends;
-use model_harbor::format::ConfigFormat;
+use model_harbor::format::{ConfigFormat, ConfigPaths};
 use model_harbor::model::{AgentRow, ProviderRow};
 use serde_json::{json, Value};
 
@@ -133,6 +133,35 @@ fn pi_cross_target_uses_target_extras() {
     let root = b.serialize_root(&[], &providers, &Value::Null, Some(&target_extras));
     assert_eq!(root["targetExtra"], json!(1));
     assert!(root["providers"]["p2"].is_object());
+}
+
+#[test]
+fn opencode_current_save_omits_empty_sections() {
+    // 空 agents / providers 列表不得写入 "agent": {} / "provider": {}
+    let b = backends::backend(ConfigFormat::Opencode);
+    let load = b.parse(r#"{ "mcp": { "s": {} } }"#).expect("解析失败");
+    let root = b.serialize_root(&[], &[], &load.extras, None);
+    assert!(root.get("agent").is_none(), "empty agent map must be omitted");
+    assert!(root.get("provider").is_none(), "empty provider map must be omitted");
+    assert!(root["mcp"].is_object(), "未知顶层字段必须保留");
+}
+
+#[test]
+fn detect_empty_yml_as_oh_my_pi() {
+    // 空内容新建场景：.yml 扩展名归 oh-my-pi，其余回落 opencode
+    assert_eq!(backends::detect_format("", "models.yml"), ConfigFormat::OhMyPi);
+    assert_eq!(backends::detect_format("", "models.yaml"), ConfigFormat::OhMyPi);
+    assert_eq!(backends::detect_format("", "models.json"), ConfigFormat::Opencode);
+    assert_eq!(backends::detect_format("", ""), ConfigFormat::Opencode);
+}
+
+#[test]
+fn detect_for_path_uses_extension_for_new_files() {
+    // 路径指向不存在的文件（新建场景）时按扩展名推断格式
+    let (fmt, _) = ConfigPaths::detect_for_path(r"C:\nonexistent_dir_zz\models.yml");
+    assert_eq!(fmt, ConfigFormat::OhMyPi);
+    let (fmt, _) = ConfigPaths::detect_for_path(r"C:\nonexistent_dir_zz\opencode.json");
+    assert_eq!(fmt, ConfigFormat::Opencode);
 }
 
 #[test]
