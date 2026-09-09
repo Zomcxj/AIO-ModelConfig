@@ -147,7 +147,10 @@ impl eframe::App for App {
                 .iter()
                 .map(|b| {
                     b.icon_rgba().map(|(rgba, w, h)| {
-                        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba);
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            rgba,
+                        );
                         ctx.load_texture(
                             format!("backend_icon_{}", b.id().label()),
                             image,
@@ -261,6 +264,11 @@ impl App {
                         None => egui::Button::new(id.label()),
                     };
                     if ui.add(btn.selected(self.current_page == id)).clicked() {
+                        if id == ConfigFormat::DeepSeekHarness
+                            && self.current_page != ConfigFormat::DeepSeekHarness
+                        {
+                            self.project_dsh_credentials();
+                        }
                         self.current_page = id;
                     }
                 }
@@ -370,47 +378,51 @@ impl App {
         egui::TopBottomPanel::bottom("bottom")
             .exact_height(32.0)
             .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(err) = &self.load_error {
+                ui.horizontal(|ui| {
+                    if let Some(err) = &self.load_error {
+                        ui.label(
+                            egui::RichText::new(format!("⚠ 加载失败: {}", err))
+                                .color(egui::Color32::from_rgb(220, 90, 90)),
+                        );
+                    }
+                    ui.label(egui::RichText::new(&self.status).weak());
                     ui.label(
-                        egui::RichText::new(format!("⚠ 加载失败: {}", err))
-                            .color(egui::Color32::from_rgb(220, 90, 90)),
+                        egui::RichText::new(format!(
+                            "agents: {} | providers: {}",
+                            self.agents.len(),
+                            self.providers.len()
+                        ))
+                        .weak(),
                     );
-                }
-                ui.label(egui::RichText::new(&self.status).weak());
-                ui.label(
-                    egui::RichText::new(format!(
-                        "agents: {} | providers: {}",
-                        self.agents.len(),
-                        self.providers.len()
-                    ))
-                    .weak(),
-                );
+                });
             });
-        });
     }
 
     fn ui_agents_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Agents");
-            let btn_label = if self.show_agents_section { "隐藏" } else { "展开" };
+            let btn_label = if self.show_agents_section {
+                "隐藏"
+            } else {
+                "展开"
+            };
             if ui.button(btn_label).clicked() {
                 self.show_agents_section = !self.show_agents_section;
             }
             if self.show_agents_section && !self.agents.is_empty() {
-                let all_open = self
-                    .agents
-                    .iter()
-                    .all(|a| self.agent_open.contains(&a.key));
+                let all_open = self.agents.iter().all(|a| self.agent_open.contains(&a.key));
                 if ui
-                    .button(if all_open { "收起全部卡片" } else { "展开全部卡片" })
+                    .button(if all_open {
+                        "收起全部卡片"
+                    } else {
+                        "展开全部卡片"
+                    })
                     .clicked()
                 {
                     if all_open {
                         self.agent_open.clear();
                     } else {
-                        self.agent_open =
-                            self.agents.iter().map(|a| a.key.clone()).collect();
+                        self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
                     }
                 }
             }
@@ -542,7 +554,10 @@ impl App {
             .collect();
         let a = &mut self.agents[idx];
         ui.horizontal(|ui| {
-            ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
+            ui.add_sized(
+                [60.0, 24.0],
+                egui::Label::new(egui::RichText::new("key").weak()),
+            );
             let key_resp = ui.add(egui::TextEdit::singleline(&mut a.key).desired_width(120.0));
             if !a.key.trim().is_empty() && other_keys.contains(a.key.trim()) {
                 key_resp.on_hover_text("key 与其他 agent 重复，保存将被阻止");
@@ -552,7 +567,10 @@ impl App {
                         .color(egui::Color32::from_rgb(220, 90, 90)),
                 );
             }
-            ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("mode").weak()));
+            ui.add_sized(
+                [60.0, 24.0],
+                egui::Label::new(egui::RichText::new("mode").weak()),
+            );
             ui.add(egui::TextEdit::singleline(&mut a.mode).desired_width(120.0));
             ui.add_sized(
                 [60.0, 24.0],
@@ -561,7 +579,10 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut a.description).desired_width(450.0));
         });
         ui.horizontal(|ui| {
-            ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("model").weak()));
+            ui.add_sized(
+                [60.0, 24.0],
+                egui::Label::new(egui::RichText::new("model").weak()),
+            );
             let mut model_options: Vec<String> = self
                 .providers
                 .iter()
@@ -599,7 +620,9 @@ impl App {
             );
             let variant_options = ["", "low", "medium", "high", "xhigh", "max", "ultra"];
             let current_variant = a.variant.clone();
-            let mut selected_variant = variant_options.iter().position(|v| *v == current_variant.as_str());
+            let mut selected_variant = variant_options
+                .iter()
+                .position(|v| *v == current_variant.as_str());
             egui::ComboBox::from_id_salt(format!("agent_variant_{}", a.key))
                 .selected_text(if current_variant.is_empty() {
                     "选择..."
@@ -626,7 +649,10 @@ impl App {
                 egui::Label::new(egui::RichText::new("temperature").weak()),
             );
             numeric_text_edit(ui, &mut a.temperature, 120.0, "");
-            ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("color").weak()));
+            ui.add_sized(
+                [60.0, 24.0],
+                egui::Label::new(egui::RichText::new("color").weak()),
+            );
             ui.add(egui::TextEdit::singleline(&mut a.color).desired_width(120.0));
             ui.add_sized(
                 [60.0, 24.0],
@@ -644,13 +670,19 @@ impl App {
     fn ui_new_agent_form(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("key").weak()),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.key)
                         .hint_text("coding-assistant")
                         .desired_width(120.0),
                 );
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("mode").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("mode").weak()),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.mode)
                         .hint_text("subagent")
@@ -667,7 +699,10 @@ impl App {
                 );
             });
             ui.horizontal(|ui| {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("model").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("model").weak()),
+                );
                 let mut model_options: Vec<String> = self
                     .providers
                     .iter()
@@ -691,10 +726,7 @@ impl App {
                     .show_ui(ui, |ui| {
                         for (i, model) in model_options.iter().enumerate() {
                             let is_selected = selected_idx == Some(i);
-                            if ui
-                                .selectable_label(is_selected, model.as_str())
-                                .clicked()
-                            {
+                            if ui.selectable_label(is_selected, model.as_str()).clicked() {
                                 selected_idx = Some(i);
                             }
                         }
@@ -708,7 +740,9 @@ impl App {
                 );
                 let variant_options = ["", "low", "medium", "high", "xhigh", "max", "ultra"];
                 let current_variant = self.new_agent.variant.clone();
-                let mut selected_variant = variant_options.iter().position(|v| *v == current_variant.as_str());
+                let mut selected_variant = variant_options
+                    .iter()
+                    .position(|v| *v == current_variant.as_str());
                 egui::ComboBox::from_id_salt("new_agent_variant")
                     .selected_text(if current_variant.is_empty() {
                         "选择..."
@@ -781,10 +815,7 @@ impl App {
     fn ui_dsh_default_model(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.strong("agent-default-model");
-            let (mut provider, mut model) = self
-                .dsh_default_model
-                .clone()
-                .unwrap_or_default();
+            let (mut provider, mut model) = self.dsh_default_model.clone().unwrap_or_default();
             let provider_changed = ui
                 .horizontal(|ui| {
                     ui.label("provider");
@@ -813,20 +844,116 @@ impl App {
         });
     }
 
+    /// 当前 agent 文件是否使用某个 provider 级字段。
+    /// 判断范围是整个文件，不是单个 provider；切换到尚未加载的目标页时
+    /// 使用完整 schema，保证新增 provider 可以输入所有专属字段。
+    fn page_has_provider_field(&self, field: &str) -> bool {
+        if self.source_format != self.current_page {
+            return true;
+        }
+        self.providers.iter().any(|provider| match self.current_page {
+            ConfigFormat::Opencode => match field {
+                "base_url" => provider.raw.get("options").and_then(|v| v.get("baseURL")).is_some(),
+                "timeout" => provider.raw.get("options").and_then(|v| v.get("timeout")).is_some(),
+                _ => false,
+            },
+            ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
+                "base_url" => provider.raw.get("baseUrl").is_some(),
+                _ => false,
+            },
+            ConfigFormat::DeepSeekHarness => match field {
+                "base_url" => provider.raw.get("baseURL").is_some(),
+                _ => false,
+            },
+        })
+    }
+
+    /// 当前 agent 文件是否使用某个 model 级字段。字段存在性按整个
+    /// agent 文件判断，避免单个模型缺字段时导致同一页面布局跳变。
+    fn page_has_model_field(&self, field: &str) -> bool {
+        if self.source_format != self.current_page {
+            return true;
+        }
+        self.providers.iter().any(|provider| {
+            provider.models.iter().any(|model| match self.current_page {
+                ConfigFormat::Opencode => match field {
+                    "name" => model.raw.get("name").is_some(),
+                    "reasoning" => model.raw.get("reasoning").is_some(),
+                    "tool_call" => model.raw.get("tool_call").is_some(),
+                    "store" => model.raw.get("options").and_then(|v| v.get("store")).is_some(),
+                    "context" => model.raw.get("limit").and_then(|v| v.get("context")).is_some(),
+                    "output" => model.raw.get("limit").and_then(|v| v.get("output")).is_some(),
+                    "input" => model.raw.get("modalities").and_then(|v| v.get("input")).is_some(),
+                    "variants" => model.raw.get("variants").is_some(),
+                    _ => false,
+                },
+                ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
+                    "name" => model.raw.get("name").is_some(),
+                    "reasoning" => model.raw.get("reasoning").is_some(),
+                    "context" => model.raw.get("contextWindow").is_some(),
+                    "output" => model.raw.get("maxTokens").is_some(),
+                    "input" => model.raw.get("input").is_some(),
+                    "variants" => model.raw.get("thinkingLevelMap").is_some()
+                        || model.raw.get("thinking").is_some(),
+                    _ => false,
+                },
+                ConfigFormat::DeepSeekHarness => match field {
+                    "name" => model.raw.get("name").is_some(),
+                    "context" => model.raw.get("contextWindow").is_some(),
+                    "output" => model.raw.get("maxTokens").is_some(),
+                    "input" => model.raw.get("input").is_some(),
+                    "variants" => model.raw.get("reasoningEfforts").is_some(),
+                    _ => false,
+                },
+            })
+        })
+    }
+
+    /// 将已加载的公共 provider 凭据投影到 DSH 专属字段。
+    /// 只在进入 DSH 页面时执行一次，避免用户在页面内主动清空后被立即回填。
+    fn project_dsh_credentials(&mut self) {
+        for provider in &mut self.providers {
+            if provider.api_key_env.trim().is_empty() {
+                provider.api_key_env = credentials::default_env_name(&provider.key);
+            }
+            if provider.api_key_secret.is_empty()
+                && provider.source_format != Some(ConfigFormat::DeepSeekHarness)
+            {
+                provider.api_key_secret = provider.api_key.clone();
+            }
+        }
+    }
+
     /// 当前页面的思考档位标签。
     fn dialect_variants(&self) -> (&'static str, &'static [&'static str]) {
         match self.current_page {
-            ConfigFormat::Opencode => ("variants", &["none", "low", "medium", "high", "xhigh", "max", "ultra"]),
-            ConfigFormat::PiAgent => ("thinkingLevelMap", &["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
-            ConfigFormat::OhMyPi => ("thinking.efforts", &["minimal", "low", "medium", "high", "xhigh", "max"]),
-            ConfigFormat::DeepSeekHarness => ("reasoningEfforts", &["minimal", "low", "medium", "high", "xhigh", "max"]),
+            ConfigFormat::Opencode => (
+                "variants",
+                &["none", "low", "medium", "high", "xhigh", "max", "ultra"],
+            ),
+            ConfigFormat::PiAgent => (
+                "thinkingLevelMap",
+                &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
+            ConfigFormat::OhMyPi => (
+                "thinking.efforts",
+                &["minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
+            ConfigFormat::DeepSeekHarness => (
+                "reasoningEfforts",
+                &["minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
         }
     }
 
     fn ui_providers_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Providers");
-            let btn_label = if self.show_providers_section { "隐藏" } else { "展开" };
+            let btn_label = if self.show_providers_section {
+                "隐藏"
+            } else {
+                "展开"
+            };
             if ui.button(btn_label).clicked() {
                 self.show_providers_section = !self.show_providers_section;
             }
@@ -836,14 +963,17 @@ impl App {
                     .iter()
                     .all(|p| self.provider_open.contains(&p.key));
                 if ui
-                    .button(if all_open { "收起全部卡片" } else { "展开全部卡片" })
+                    .button(if all_open {
+                        "收起全部卡片"
+                    } else {
+                        "展开全部卡片"
+                    })
                     .clicked()
                 {
                     if all_open {
                         self.provider_open.clear();
                     } else {
-                        self.provider_open =
-                            self.providers.iter().map(|p| p.key.clone()).collect();
+                        self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
                     }
                 }
             }
@@ -974,10 +1104,20 @@ impl App {
             .map(|(_, p)| p.key.trim().to_string())
             .collect();
         let (variants_label, variant_names) = self.dialect_variants();
-        let p = &mut self.providers[idx];
         let show_oc = self.current_page == ConfigFormat::Opencode;
         let show_omp = self.current_page == ConfigFormat::OhMyPi;
         let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
+        let show_provider_base_url = self.page_has_provider_field("base_url");
+        let show_provider_timeout = self.page_has_provider_field("timeout");
+        let show_model_name = self.page_has_model_field("name");
+        let show_model_context = self.page_has_model_field("context");
+        let show_model_output = self.page_has_model_field("output");
+        let show_model_input = self.page_has_model_field("input");
+        let show_model_variants = self.page_has_model_field("variants");
+        let show_model_reasoning = self.page_has_model_field("reasoning");
+        let show_model_tool_call = self.page_has_model_field("tool_call");
+        let show_model_store = self.page_has_model_field("store");
+        let p = &mut self.providers[idx];
         let base_label = if show_oc {
             "options.baseURL"
         } else if show_dsh {
@@ -993,11 +1133,18 @@ impl App {
             "apiKey"
         };
         let timeout_label = "options.timeout";
-        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
+        let context_label = if show_oc {
+            "limit.context"
+        } else {
+            "contextWindow"
+        };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
         ui.horizontal(|ui| {
-            ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
+            ui.add_sized(
+                [60.0, 24.0],
+                egui::Label::new(egui::RichText::new("key").weak()),
+            );
             let key_resp = ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
             if !p.key.trim().is_empty() && other_keys.contains(p.key.trim()) {
                 key_resp.on_hover_text("key 与其他 provider 重复，保存将被阻止");
@@ -1012,12 +1159,13 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("description").weak()),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut p.description).desired_width(450.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut p.description).desired_width(450.0));
             }
             if show_oc {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("npm").weak()),
+                );
                 let npm_options = [
                     "",
                     "@ai-sdk/openai",
@@ -1048,7 +1196,10 @@ impl App {
                 }
             }
             if !show_oc {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("api").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("api").weak()),
+                );
                 // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
                 let api_options: &[&str] = if show_omp {
                     &[
@@ -1096,30 +1247,35 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new(base_label).weak()),
-            );
-            ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(200.0));
+            if show_provider_base_url {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new(base_label).weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(200.0));
+            }
             ui.add_sized(
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new(api_key_label).weak()),
             );
             if show_dsh {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key_env).desired_width(240.0));
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("API Key").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("API Key").weak()),
+                );
                 ui.add(egui::TextEdit::singleline(&mut p.api_key_secret).desired_width(240.0));
             } else {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
             }
-            if show_oc {
+            if show_oc && show_provider_timeout {
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(timeout_label).weak()),
                 );
                 numeric_text_edit(ui, &mut p.timeout, 53.0, "");
             }
-            if !show_oc {
+            if !show_oc && !show_dsh {
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("compat").weak()),
@@ -1140,7 +1296,10 @@ impl App {
                 .map(|(_, m)| m.id.trim().to_string())
                 .collect();
             ui.horizontal_wrapped(|ui| {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("id:").weak()),
+                );
                 let id_resp =
                     ui.add(egui::TextEdit::singleline(&mut p.models[j].id).desired_width(120.0));
                 if !p.models[j].id.trim().is_empty() && other_ids.contains(p.models[j].id.trim()) {
@@ -1151,38 +1310,48 @@ impl App {
                             .color(egui::Color32::from_rgb(220, 90, 90)),
                     );
                 }
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("name:").weak()),
-                );
-                ui.add(egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0));
-                if !show_dsh {
+                if show_model_name {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("name:").weak()),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0));
+                }
+                if show_model_reasoning && (show_oc || !show_dsh) {
                     ui.checkbox(&mut p.models[j].reasoning, "reasoning");
                 }
-                if show_oc {
+                if show_model_tool_call && show_oc {
                     ui.checkbox(&mut p.models[j].tool_call, "tool_call");
+                }
+                if show_model_store && show_oc {
                     ui.checkbox(&mut p.models[j].store, "store");
                 }
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(context_label).weak()),
-                );
-                numeric_text_edit(ui, &mut p.models[j].context, 53.0, "");
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(output_label).weak()),
-                );
-                numeric_text_edit(ui, &mut p.models[j].output, 53.0, "");
+                if show_model_context {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new(context_label).weak()),
+                    );
+                    numeric_text_edit(ui, &mut p.models[j].context, 53.0, "");
+                }
+                if show_model_output {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new(output_label).weak()),
+                    );
+                    numeric_text_edit(ui, &mut p.models[j].output, 53.0, "");
+                }
             });
             ui.horizontal_wrapped(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(input_label).weak()),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut p.models[j].modalities_input)
-                        .desired_width(80.0),
-                );
+                if show_model_input {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new(input_label).weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.models[j].modalities_input)
+                            .desired_width(80.0),
+                    );
+                }
                 if show_oc {
                     ui.add_sized(
                         [60.0, 24.0],
@@ -1193,10 +1362,12 @@ impl App {
                             .desired_width(80.0),
                     );
                 }
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(variants_label).weak()),
-                );
+                if show_model_variants {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new(variants_label).weak()),
+                    );
+                }
                 let current_variants = p.models[j].variants.clone();
                 let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                     Vec::new()
@@ -1250,8 +1421,15 @@ impl App {
         ui.add_space(2.0);
         let show_new_model_key = format!("show_new_model_{}", p.key);
         let show_new_model = self.variant_open.contains(&show_new_model_key);
-        let btn_text = if show_new_model { "收起" } else { "添加 Model" };
-        if ui.add_sized([120.0, 20.0], egui::Button::new(btn_text)).clicked() {
+        let btn_text = if show_new_model {
+            "收起"
+        } else {
+            "添加 Model"
+        };
+        if ui
+            .add_sized([120.0, 20.0], egui::Button::new(btn_text))
+            .clicked()
+        {
             if show_new_model {
                 self.variant_open.remove(&show_new_model_key);
             } else {
@@ -1260,14 +1438,19 @@ impl App {
         }
         if show_new_model {
             ui.horizontal(|ui| {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("id:").weak()),
+                );
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.id).desired_width(120.0));
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("name:").weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.name).desired_width(120.0));
-                ui.checkbox(&mut p.new_model.reasoning, "reasoning");
+                if show_oc || !show_dsh {
+                    ui.checkbox(&mut p.new_model.reasoning, "reasoning");
+                }
                 if show_oc {
                     ui.checkbox(&mut p.new_model.tool_call, "tool_call");
                     ui.checkbox(&mut p.new_model.store, "store");
@@ -1381,13 +1564,20 @@ impl App {
             "apiKey"
         };
         let timeout_label = "options.timeout";
-        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
+        let context_label = if show_oc {
+            "limit.context"
+        } else {
+            "contextWindow"
+        };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
         let (variants_label, variant_names) = self.dialect_variants();
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("key").weak()),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.key)
                         .hint_text("openai")
@@ -1405,7 +1595,10 @@ impl App {
                     );
                 }
                 if show_oc {
-                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("npm").weak()),
+                    );
                     let npm_options = [
                         "",
                         "@ai-sdk/openai",
@@ -1414,7 +1607,8 @@ impl App {
                         "@ai-sdk/openai-compatible",
                     ];
                     let current_npm = self.new_provider.npm.clone();
-                    let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
+                    let mut selected_npm =
+                        npm_options.iter().position(|n| *n == current_npm.as_str());
                     egui::ComboBox::from_id_salt("new_provider_npm")
                         .selected_text(if current_npm.is_empty() {
                             "选择 npm 包..."
@@ -1435,7 +1629,10 @@ impl App {
                     }
                 }
                 if !show_oc {
-                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("api").weak()));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("api").weak()),
+                    );
                     // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
                     let api_options: &[&str] = if show_omp {
                         &[
@@ -1502,7 +1699,10 @@ impl App {
                             .hint_text("DEEPSEEK_API_KEY")
                             .desired_width(240.0),
                     );
-                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("API Key").weak()));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("API Key").weak()),
+                    );
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_provider.api_key_secret)
                             .hint_text("实际密钥")
@@ -1522,7 +1722,7 @@ impl App {
                     );
                     numeric_text_edit(ui, &mut self.new_provider.timeout, 53.0, "180000");
                 }
-                if !show_oc {
+                if !show_oc && !show_dsh {
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("compat").weak()),
@@ -1535,14 +1735,23 @@ impl App {
             let mut rm_new: Option<usize> = None;
             for j in 0..self.new_provider.models.len() {
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].id).desired_width(120.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("id:").weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.models[j].id)
+                            .desired_width(120.0),
+                    );
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("name:").weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].name).desired_width(120.0));
-                    if !show_dsh {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.models[j].name)
+                            .desired_width(120.0),
+                    );
+                    if show_oc || !show_dsh {
                         ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
                     }
                     if show_oc {
@@ -1570,7 +1779,14 @@ impl App {
             ui.add_space(2.0);
             let show_new_model_key = format!("new_provider_show_model_{}", self.new_provider.key);
             let show_new_model = self.variant_open.contains(&show_new_model_key);
-            if ui.button(if show_new_model { "收起" } else { "添加 Model" }).clicked() {
+            if ui
+                .button(if show_new_model {
+                    "收起"
+                } else {
+                    "添加 Model"
+                })
+                .clicked()
+            {
                 if show_new_model {
                     self.variant_open.remove(&show_new_model_key);
                 } else {
@@ -1579,14 +1795,23 @@ impl App {
             }
             if show_new_model {
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("id:").weak()));
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.id).desired_width(120.0));
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("id:").weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.new_model.id)
+                            .desired_width(120.0),
+                    );
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("name:").weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.name).desired_width(120.0));
-                    if !show_dsh {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.new_model.name)
+                            .desired_width(120.0),
+                    );
+                    if show_oc || !show_dsh {
                         ui.checkbox(&mut self.new_provider.new_model.reasoning, "reasoning");
                     }
                     if show_oc {
@@ -1609,13 +1834,23 @@ impl App {
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(input_label).weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_input).desired_width(80.0));
+                    ui.add(
+                        egui::TextEdit::singleline(
+                            &mut self.new_provider.new_model.modalities_input,
+                        )
+                        .desired_width(80.0),
+                    );
                     if show_oc {
                         ui.add_sized(
                             [60.0, 24.0],
                             egui::Label::new(egui::RichText::new("modalities.output").weak()),
                         );
-                        ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_output).desired_width(80.0));
+                        ui.add(
+                            egui::TextEdit::singleline(
+                                &mut self.new_provider.new_model.modalities_output,
+                            )
+                            .desired_width(80.0),
+                        );
                     }
                     ui.add_sized(
                         [60.0, 24.0],
@@ -1625,9 +1860,17 @@ impl App {
                     let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                         Vec::new()
                     } else {
-                        current_variants.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                        current_variants
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
                     };
-                    let display = if selected_variants.is_empty() { "选择..." } else { &current_variants };
+                    let display = if selected_variants.is_empty() {
+                        "选择..."
+                    } else {
+                        &current_variants
+                    };
                     let popup_key = "new_provider_new_model_variant".to_string();
                     let is_open = self.variant_open.contains(&popup_key);
                     if ui.button(display).clicked() {
@@ -1772,9 +2015,8 @@ impl App {
         let variant_prefix = format!("variant_open_{}_", old);
         let show_key = format!("show_new_model_{}", old);
         let new_variant_key = format!("new_model_variant_{}", old);
-        self.variant_open.retain(|k| {
-            !k.starts_with(&variant_prefix) && k != &show_key && k != &new_variant_key
-        });
+        self.variant_open
+            .retain(|k| !k.starts_with(&variant_prefix) && k != &show_key && k != &new_variant_key);
     }
 
     /// 统计非法数字字段数（非空且解析失败），保存后提示用户它们被忽略。
@@ -1835,21 +2077,21 @@ impl App {
     /// - 路径已修改但未加载 → 仍写该路径，但按“先读后合并”（防止覆盖目标文件已有配置）；
     /// - 其余 → 该后端默认目标（本地优先，WSL 回落）。
     fn page_save_path(&self, fmt: ConfigFormat) -> PageTarget {
-        if self.source_format == fmt && !self.config_path.is_empty() {
-            if self.config_path == self.loaded_path {
-                PageTarget::Current(self.config_path.clone())
-            } else {
-                PageTarget::Modified(self.config_path.clone())
-            }
-        } else {
-            let path = self
-                .targets
-                .iter()
-                .find(|t| t.backend == fmt)
-                .map(|t| t.path.clone())
-                .unwrap_or_default();
-            PageTarget::Default(path)
+        if !self.config_path.is_empty() && self.config_path != self.loaded_path {
+            // 用户已经在路径框中明确指定了目标文件，即使尚未点击“加载”，
+            // 也必须使用该路径；保存流程会先读目标并按目标格式合并，不能静默回落默认路径。
+            return PageTarget::Modified(self.config_path.clone());
         }
+        if self.source_format == fmt && !self.config_path.is_empty() {
+            return PageTarget::Current(self.config_path.clone());
+        }
+        let path = self
+            .targets
+            .iter()
+            .find(|t| t.backend == fmt)
+            .map(|t| t.path.clone())
+            .unwrap_or_default();
+        PageTarget::Default(path)
     }
 
     /// 页头：本页保存按钮 + 写入路径。
@@ -1868,30 +2110,26 @@ impl App {
             if ui
                 .add_enabled(
                     can_save,
-                    egui::Button::new(
-                        egui::RichText::new("保存").strong(),
-                    ),
+                    egui::Button::new(egui::RichText::new("保存").strong()),
                 )
                 .clicked()
             {
                 self.save_page(fmt);
             }
             if let Some(icon) = self.icon_for(fmt) {
-                ui.add(
-                    egui::Image::from_texture(icon)
-                        .fit_to_exact_size(egui::vec2(12.0, 12.0)),
-                );
+                ui.add(egui::Image::from_texture(icon).fit_to_exact_size(egui::vec2(12.0, 12.0)));
             }
-            ui.label(
-                egui::RichText::new(format!("写入: {}", path)).weak(),
-            )
-            .on_hover_text(kind);
+            ui.label(egui::RichText::new(format!("写入: {}", path)).weak())
+                .on_hover_text(kind);
             // 该格式不支持的区块提前提示，避免保存后才发现数据没写入
             if fmt != ConfigFormat::Opencode && !self.agents.is_empty() {
                 ui.label(
-                    egui::RichText::new(format!("⚠ {} 个 agents 不会写入该格式", self.agents.len()))
-                        .small()
-                        .color(egui::Color32::from_rgb(220, 160, 60)),
+                    egui::RichText::new(format!(
+                        "⚠ {} 个 agents 不会写入该格式",
+                        self.agents.len()
+                    ))
+                    .small()
+                    .color(egui::Color32::from_rgb(220, 160, 60)),
                 )
                 .on_hover_text("该格式不支持 agent 定义，保存时将忽略");
             }
@@ -1918,10 +2156,7 @@ impl App {
             }
             PageTarget::Default(_) => {
                 if !self.targets.iter().any(|t| t.backend == fmt && t.available) {
-                    self.status = format!(
-                        "{}: 未安装（本地与 WSL 均未找到配置）",
-                        fmt.label()
-                    );
+                    self.status = format!("{}: 未安装（本地与 WSL 均未找到配置）", fmt.label());
                     return;
                 }
             }
@@ -1936,8 +2171,10 @@ impl App {
         if ok {
             // 该格式不支持 agents 时明确告知，避免误以为已写入
             if fmt != ConfigFormat::Opencode && !self.agents.is_empty() {
-                self.status
-                    .push_str(&format!("（{} 个 agents 未写入：该格式不支持）", self.agents.len()));
+                self.status.push_str(&format!(
+                    "（{} 个 agents 未写入：该格式不支持）",
+                    self.agents.len()
+                ));
             }
             let bad = self.count_invalid_numeric_fields();
             if bad > 0 {
@@ -1952,9 +2189,10 @@ impl App {
                     Ok(()) => self
                         .status
                         .push_str(&format!("; {}(WSL): 已同步", fmt.label())),
-                    Err(e) => self
-                        .status
-                        .push_str(&format!("; {}(WSL): 同步失败({})", fmt.label(), e)),
+                    Err(e) => {
+                        self.status
+                            .push_str(&format!("; {}(WSL): 同步失败({})", fmt.label(), e))
+                    }
                 }
             }
         }
@@ -1964,7 +2202,9 @@ impl App {
     fn save_backend_to(&mut self, fmt: ConfigFormat, path: &str) -> Result<(), String> {
         let backend = backends::backend(fmt);
         // 仅“已加载的当前文件”允许整体替换；其余目标（含已修改未加载的路径）一律先读后合并
-        let is_current = path == self.loaded_path;
+        // 同一路径但切换到其他格式页面时，必须按目标格式先读后合并，
+        // 只有来源格式和已加载路径都匹配时才允许整体替换。
+        let is_current = self.source_format == fmt && path == self.loaded_path;
         let target_root: Option<Value> = if is_current {
             None
         } else {
@@ -1995,7 +2235,18 @@ impl App {
                 None
             },
         );
-        let content = backend.render(&root, self.save_format == SaveFormat::Compact)?;
+        let content = if fmt == ConfigFormat::DeepSeekHarness && is_current {
+            // 未发生任何结构化修改时直接保留原始 YAML，避免无意义的
+            // 缩进、引号、键顺序变化；实际修改后再使用稳定的 DSH 渲染器。
+            match util::read_config_content(path) {
+                Ok(original) if util::parse_yaml_content(&original).ok().as_ref() == Some(&root) => {
+                    original
+                }
+                _ => backend.render(&root, self.save_format == SaveFormat::Compact)?,
+            }
+        } else {
+            backend.render(&root, self.save_format == SaveFormat::Compact)?
+        };
         let dsh_sidecar_backup = if fmt == ConfigFormat::DeepSeekHarness {
             let sidecar = credentials::sidecar_path(path);
             if util::config_exists(&sidecar) {
@@ -2110,10 +2361,10 @@ fn serialize_pretty(object: &Map<String, Value>, level: usize, role: CompactRole
                 current.push(field);
                 continue;
             }
-            let candidate_len: usize = current.iter().map(|f| f.len()).sum::<usize>()
-                + current.len() - 1
-                + 2
-                + field.len();
+            let candidate_len: usize =
+                current.iter().map(|f| f.len()).sum::<usize>() + current.len() - 1
+                    + 2
+                    + field.len();
             if candidate_len <= PRETTY_LINE_MAX {
                 current.push(field);
                 continue;
@@ -2122,9 +2373,10 @@ fn serialize_pretty(object: &Map<String, Value>, level: usize, role: CompactRole
 
         if !current.is_empty() {
             let first = &current[0];
-            let rest: Vec<&str> = current[1..].iter().map(|f| {
-                f.strip_prefix(&child_indent).unwrap_or(f.as_str())
-            }).collect();
+            let rest: Vec<&str> = current[1..]
+                .iter()
+                .map(|f| f.strip_prefix(&child_indent).unwrap_or(f.as_str()))
+                .collect();
             let mut parts: Vec<&str> = Vec::new();
             parts.push(first);
             for r in &rest {
@@ -2159,9 +2411,10 @@ fn serialize_pretty(object: &Map<String, Value>, level: usize, role: CompactRole
     }
     if !current.is_empty() {
         let first = &current[0];
-        let rest: Vec<&str> = current[1..].iter().map(|f| {
-            f.strip_prefix(&child_indent).unwrap_or(f.as_str())
-        }).collect();
+        let rest: Vec<&str> = current[1..]
+            .iter()
+            .map(|f| f.strip_prefix(&child_indent).unwrap_or(f.as_str()))
+            .collect();
         let mut parts: Vec<&str> = Vec::new();
         parts.push(first);
         for r in &rest {
@@ -2246,7 +2499,14 @@ fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole
     let indent = "  ".repeat(level);
     let child_indent = "  ".repeat(level + 1);
 
-    if level > 0 && !matches!(role, CompactRole::AgentContainer | CompactRole::ProviderContainer | CompactRole::ModelsContainer) {
+    if level > 0
+        && !matches!(
+            role,
+            CompactRole::AgentContainer
+                | CompactRole::ProviderContainer
+                | CompactRole::ModelsContainer
+        )
+    {
         return serialize_fields(object, level, role);
     }
 
@@ -2490,10 +2750,18 @@ mod compact_tests {
         let output = pretty_json(&root);
         println!("=== PRETTY OUTPUT ===\n{}", output);
         // model, variant, temperature, color should be on the same line
-        assert!(output.contains("\"model\": \"sensenova/sensenova-6.8-flash-lite\", \"variant\": \"high\","),
-            "agent model+variant should combine:\n{}", output);
-        assert!(output.contains("\"temperature\": 0.3, \"color\": \"info\", \"system\": \"负责文档\""),
-            "agent temperature+color+system should combine:\n{}", output);
+        assert!(
+            output.contains(
+                "\"model\": \"sensenova/sensenova-6.8-flash-lite\", \"variant\": \"high\","
+            ),
+            "agent model+variant should combine:\n{}",
+            output
+        );
+        assert!(
+            output.contains("\"temperature\": 0.3, \"color\": \"info\", \"system\": \"负责文档\""),
+            "agent temperature+color+system should combine:\n{}",
+            output
+        );
     }
 
     #[test]
@@ -2561,7 +2829,7 @@ mod compact_tests {
                 }
             }
         });
-let output = compact_json(&root);
+        let output = compact_json(&root);
         assert!(output.contains("\"models\": {\"m\":{"));
         assert!(output.contains("\"name\":\"Model\",\"reasoning\":true"));
         assert!(output.contains("\"variants\":{\"medium\":{},\"high\":{}}"));
@@ -2587,9 +2855,11 @@ let output = compact_json(&root);
                 }
             }
         });
-let output = compact_json(&root);
+        let output = compact_json(&root);
 
-assert!(output.contains("\"server\": {\"command\":\"node\",\"args\":[\"server.js\"],\"enabled\":true"));
+        assert!(output.contains(
+            "\"server\": {\"command\":\"node\",\"args\":[\"server.js\"],\"enabled\":true"
+        ));
         assert!(output.contains("\"options\": {\"baseURL\":\"https://example.com/v1\",\"apiKey\":\"sk-test\",\"timeout\":30000"));
     }
 
@@ -2605,7 +2875,8 @@ assert!(output.contains("\"server\": {\"command\":\"node\",\"args\":[\"server.js
 
         let output = compact_json(&root);
 
-        assert!(output.contains("\"options\": {\"baseURL\":\"https://example.com/v1\",\"timeout\":30000}"));
+        assert!(output
+            .contains("\"options\": {\"baseURL\":\"https://example.com/v1\",\"timeout\":30000}"));
         assert!(!output.contains("\"options\": {\n"));
     }
 
@@ -2627,4 +2898,3 @@ assert!(output.contains("\"server\": {\"command\":\"node\",\"args\":[\"server.js
         assert!(compact_json(&root).contains("\"high\":{\"reasoningEffort\":\"high\"}"));
     }
 }
-

@@ -10,14 +10,15 @@
 
 use super::{Backend, BackendLoad};
 use crate::convert::{
-    self, is_opencode_shaped_model, is_opencode_shaped_provider,
+    self, is_dsh_shaped_model, is_dsh_shaped_provider, is_opencode_shaped_model,
+    is_opencode_shaped_provider,
 };
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ModelRow, ProviderRow};
+use crate::util::WslPathProbe;
 use crate::util::{
     parse_config_content, parse_yaml_content, read_config_content, to_yaml_string, wsl_home,
 };
-use crate::util::WslPathProbe;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::Path;
@@ -41,11 +42,12 @@ fn string_set(items: impl Iterator<Item = String>) -> HashSet<String> {
 /// 模型 → omp 方言对象（保留 raw 中的未知字段，思考档位输出 thinking 块）。
 pub fn model_to_omp(m: &ModelRow) -> Value {
     // opencode 来源全新构造；pi/omp 来源以 raw 为基底保留扩展字段
-    let mut obj: Map<String, Value> = if is_opencode_shaped_model(&m.raw) {
-        Map::new()
-    } else {
-        m.raw.as_object().cloned().unwrap_or_default()
-    };
+    let mut obj: Map<String, Value> =
+        if is_opencode_shaped_model(&m.raw) || is_dsh_shaped_model(&m.raw) {
+            Map::new()
+        } else {
+            m.raw.as_object().cloned().unwrap_or_default()
+        };
     // pi 方言思考键统一转为 thinking 块
     obj.remove("thinkingLevelMap");
 
@@ -151,11 +153,12 @@ fn omp_thinking(m: &ModelRow) -> Option<Value> {
 
 /// Provider → omp 方言对象（raw 基底保留 headers/auth/discovery/modelOverrides 等）。
 pub fn provider_to_omp(p: &ProviderRow) -> Value {
-    let mut obj: Map<String, Value> = if is_opencode_shaped_provider(&p.raw) {
-        Map::new()
-    } else {
-        p.raw.as_object().cloned().unwrap_or_default()
-    };
+    let mut obj: Map<String, Value> =
+        if is_opencode_shaped_provider(&p.raw) || is_dsh_shaped_provider(&p.raw) {
+            Map::new()
+        } else {
+            p.raw.as_object().cloned().unwrap_or_default()
+        };
 
     let api = if !p.npm.is_empty() {
         convert::npm_to_api(&p.npm)
@@ -166,12 +169,12 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
     };
 
     if !p.base_url.is_empty() {
-        let save_url = if api == "anthropic-messages" && convert::is_official_anthropic_url(&p.base_url)
-        {
-            p.base_url.trim_end_matches("/v1").to_string()
-        } else {
-            p.base_url.clone()
-        };
+        let save_url =
+            if api == "anthropic-messages" && convert::is_official_anthropic_url(&p.base_url) {
+                p.base_url.trim_end_matches("/v1").to_string()
+            } else {
+                p.base_url.clone()
+            };
         obj.insert("baseUrl".into(), Value::String(save_url));
     } else {
         obj.remove("baseUrl");

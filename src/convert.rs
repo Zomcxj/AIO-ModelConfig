@@ -12,39 +12,17 @@ pub(crate) fn is_opencode_shaped_model(raw: &Value) -> bool {
 }
 
 pub(crate) fn is_opencode_shaped_provider(raw: &Value) -> bool {
-    raw.get("options").is_some()
-        || raw
-            .get("models")
-            .map(|m| m.is_object())
-            .unwrap_or(false)
+    raw.get("options").is_some() || raw.get("models").map(|m| m.is_object()).unwrap_or(false)
 }
 
 /// 判断 raw 是否为 pi / omp 方言（含 pi 特征键）。
 /// opencode 输出时以此为界：pi 形状全新构造，防止方言键泄漏。
-pub(crate) fn is_pi_shaped_model(raw: &Value) -> bool {
-    [
-        "id",
-        "input",
-        "contextWindow",
-        "maxTokens",
-        "thinkingLevelMap",
-        "thinking",
-    ]
-    .iter()
-    .any(|k| raw.get(k).is_some())
+pub(crate) fn is_dsh_shaped_model(raw: &Value) -> bool {
+    raw.get("reasoningEfforts").is_some()
 }
 
-pub(crate) fn is_pi_shaped_provider(raw: &Value) -> bool {
-    raw.get("baseUrl").is_some()
-        || raw.get("api").is_some()
-        || raw.get("compat").is_some()
-        || raw.get("authHeader").is_some()
-        || raw.get("headers").is_some()
-        || raw.get("discovery").is_some()
-        || raw
-            .get("models")
-            .map(|m| m.is_array())
-            .unwrap_or(false)
+pub(crate) fn is_dsh_shaped_provider(raw: &Value) -> bool {
+    raw.get("apiKeyEnv").is_some() || raw.get("baseURL").is_some()
 }
 
 /// 仅对 Anthropic 官方端点做 /v1 归一化；自定义代理 URL 原样保留。
@@ -67,8 +45,12 @@ pub fn api_to_npm(api: &str) -> String {
         "anthropic-messages" => "@ai-sdk/anthropic".to_string(),
         "google-generative-ai" => "@ai-sdk/google".to_string(),
         // 以下 api 无对应 @ai-sdk npm 包（opencode 侧回退默认兼容层）
-        "openai-completions" | "openai-responses" | "openai-codex-responses"
-        | "azure-openai-responses" | "bedrock-converse-stream" | "google-gemini-cli"
+        "openai-completions"
+        | "openai-responses"
+        | "openai-codex-responses"
+        | "azure-openai-responses"
+        | "bedrock-converse-stream"
+        | "google-gemini-cli"
         | "google-vertex" => String::new(),
         other => other.to_string(),
     }
@@ -120,17 +102,24 @@ pub fn model_from_pi(v: &Value) -> ModelRow {
         modalities_input,
         modalities_output: "text".to_string(),
         variants: thinking_values(v),
+        original_variants: thinking_values(v),
+        source_format: Some(if is_dsh_shaped_model(v) {
+            crate::format::ConfigFormat::DeepSeekHarness
+        } else {
+            crate::format::ConfigFormat::PiAgent
+        }),
         raw: v.clone(),
     }
 }
 
 pub fn model_to_pi(m: &ModelRow) -> Value {
     // opencode 来源全新构造；pi/omp 来源以 raw 为基底保留扩展字段（cost/toolName 等）
-    let mut obj: Map<String, Value> = if is_opencode_shaped_model(&m.raw) {
-        Map::new()
-    } else {
-        m.raw.as_object().cloned().unwrap_or_default()
-    };
+    let mut obj: Map<String, Value> =
+        if is_opencode_shaped_model(&m.raw) || is_dsh_shaped_model(&m.raw) {
+            Map::new()
+        } else {
+            m.raw.as_object().cloned().unwrap_or_default()
+        };
     // omp 方言的 thinking 块由 thinkingLevelMap 表达，翻译后移除
     obj.remove("thinking");
     obj.insert("id".into(), Value::String(m.id.clone()));
@@ -244,11 +233,14 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         base_url,
         api_key: str_at(v, "apiKey").to_string(),
         api_key_env: String::new(),
+        original_api_key_env: String::new(),
         api_key_secret: String::new(),
+        original_api_key_secret: String::new(),
         timeout: String::new(),
         compat,
         models,
         new_model: ModelRow::new(),
+        source_format: Some(crate::format::ConfigFormat::PiAgent),
         raw: v.clone(),
         pi_api: api.to_string(),
     };
@@ -257,11 +249,12 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
     // opencode 来源全新构造；pi/omp 来源以 raw 为基底保留扩展字段（headers/auth 等）
-    let mut obj: Map<String, Value> = if is_opencode_shaped_provider(&p.raw) {
-        Map::new()
-    } else {
-        p.raw.as_object().cloned().unwrap_or_default()
-    };
+    let mut obj: Map<String, Value> =
+        if is_opencode_shaped_provider(&p.raw) || is_dsh_shaped_provider(&p.raw) {
+            Map::new()
+        } else {
+            p.raw.as_object().cloned().unwrap_or_default()
+        };
     // compat 仅管理 supportsDeveloperRole，其余键（maxTokensField/extraBody/...）保留
     if !p.compat {
         let mut c = obj
@@ -308,11 +301,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
 pub fn load_pi_providers(root: &Value) -> Vec<ProviderRow> {
     root.get("providers")
         .and_then(|x| x.as_object())
-        .map(|o| {
-            o.iter()
-                .map(|(k, pv)| provider_from_pi(k, pv))
-                .collect()
-        })
+        .map(|o| o.iter().map(|(k, pv)| provider_from_pi(k, pv)).collect())
         .unwrap_or_default()
 }
 
