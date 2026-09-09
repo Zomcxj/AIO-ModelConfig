@@ -1,8 +1,8 @@
 #![windows_subsystem = "windows"]
 
 use eframe::egui;
-use aio_model_config::app::App;
-use aio_model_config::theme::Theme;
+use model_harbor::app::App;
+use model_harbor::theme::Theme;
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon_rgba.bin");
 const ICON_W: u32 = 256;
@@ -13,7 +13,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1250.0, 820.0])
             .with_min_inner_size([970.0, 660.0])
-            .with_title("AIO-ModelConfig")
+            .with_title("ModelHarbor")
             .with_icon(egui::IconData {
                 rgba: ICON_BYTES.to_vec(),
                 width: ICON_W,
@@ -22,7 +22,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "AIO-ModelConfig",
+        "ModelHarbor",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_fonts(build_cjk_fonts());
@@ -34,7 +34,7 @@ fn main() -> eframe::Result {
                     if let raw_window_handle::RawWindowHandle::Win32(w) = handle.as_raw() {
                         unsafe {
                             let hwnd = w.hwnd.get() as *mut core::ffi::c_void;
-                            aio_model_config::cursor::init_grabbing_cursor(hwnd);
+                            model_harbor::cursor::init_grabbing_cursor(hwnd);
                         }
                     }
                 }

@@ -1,11 +1,11 @@
 //! oh-my-pi 后端：双方言加载 / thinking 翻译 / raw 保留 / YAML 往返。
 
-use aio_model_config::backends;
-use aio_model_config::backends::oh_my_pi::{model_to_omp, provider_to_omp};
-use aio_model_config::convert;
-use aio_model_config::format::ConfigFormat;
-use aio_model_config::model::{ModelRow, ProviderRow};
-use aio_model_config::util::parse_yaml_content;
+use model_harbor::backends;
+use model_harbor::backends::oh_my_pi::{model_to_omp, provider_to_omp};
+use model_harbor::convert;
+use model_harbor::format::ConfigFormat;
+use model_harbor::model::{ModelRow, ProviderRow};
+use model_harbor::util::parse_yaml_content;
 use serde_json::{json, Value};
 
 fn omp_yaml() -> String {
@@ -47,7 +47,7 @@ fn omp_yaml() -> String {
 "#.to_string()
 }
 
-fn load_omp(content: &str) -> aio_model_config::backends::BackendLoad {
+fn load_omp(content: &str) -> model_harbor::backends::BackendLoad {
     backends::backend(ConfigFormat::OhMyPi)
         .parse(content)
         .expect("omp 解析失败")

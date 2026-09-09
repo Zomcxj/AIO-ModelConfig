@@ -1,11 +1,11 @@
 [package]
-name = "aio-model-config"
+name = "model-harbor"
 version = "0.1.1"
 edition = "2021"
 build = "build.rs"
 
 [[bin]]
-name = "aio-model-config"
+name = "model-harbor"
 path = "src/main.rs"
 
 [dependencies]

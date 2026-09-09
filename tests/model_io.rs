@@ -1,6 +1,6 @@
-use aio_model_config::app::{load_opencode_result, load_or_empty};
-use aio_model_config::model::{AgentRow, ModelRow, ProviderRow};
-use aio_model_config::util::{is_wsl_path, win_to_wsl};
+use model_harbor::app::{load_opencode_result, load_or_empty};
+use model_harbor::model::{AgentRow, ModelRow, ProviderRow};
+use model_harbor::util::{is_wsl_path, win_to_wsl};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::PathBuf;

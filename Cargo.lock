@@ -130,19 +130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aio-model-config"
-version = "0.1.1"
-dependencies = [
- "eframe",
- "raw-window-handle",
- "rfd",
- "serde_json",
- "serde_yaml_ng",
- "windows-sys 0.59.0",
- "winres",
-]
-
-[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1820,6 +1807,19 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "model-harbor"
+version = "0.1.1"
+dependencies = [
+ "eframe",
+ "raw-window-handle",
+ "rfd",
+ "serde_json",
+ "serde_yaml_ng",
+ "windows-sys 0.59.0",
+ "winres",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
 //! 后端注册表架构回归：detect / parse / serialize_root 全管线。
 
-use aio_model_config::backends;
-use aio_model_config::format::ConfigFormat;
-use aio_model_config::model::{AgentRow, ProviderRow};
+use model_harbor::backends;
+use model_harbor::format::ConfigFormat;
+use model_harbor::model::{AgentRow, ProviderRow};
 use serde_json::{json, Value};
 
 fn oc_agent(key: &str) -> AgentRow {
@@ -13,7 +13,7 @@ fn oc_agent(key: &str) -> AgentRow {
 }
 
 fn pi_provider(key: &str, model_id: &str) -> ProviderRow {
-    use aio_model_config::model::ModelRow;
+    use model_harbor::model::ModelRow;
     let mut p = ProviderRow::new();
     p.key = key.to_string();
     p.base_url = "https://api.example.com/v1".into();

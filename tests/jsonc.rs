@@ -1,6 +1,6 @@
-use aio_model_config::app::parse_config_content;
-use aio_model_config::format::{ConfigFormat, ConfigPaths};
-use aio_model_config::util::strip_jsonc_comments;
+use model_harbor::app::parse_config_content;
+use model_harbor::format::{ConfigFormat, ConfigPaths};
+use model_harbor::util::strip_jsonc_comments;
 
 #[test]
 fn strip_line_comments() {

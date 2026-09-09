@@ -1,6 +1,6 @@
-use aio_model_config::app::{load_pi_agent_result, merge_opencode_root};
-use aio_model_config::convert;
-use aio_model_config::model::{AgentRow, ProviderRow};
+use model_harbor::app::{load_pi_agent_result, merge_opencode_root};
+use model_harbor::convert;
+use model_harbor::model::{AgentRow, ProviderRow};
 use serde_json::json;
 
 #[test]

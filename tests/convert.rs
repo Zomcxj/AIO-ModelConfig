@@ -1,4 +1,4 @@
-use aio_model_config::convert;
+use model_harbor::convert;
 use serde_json::json;
 
 #[test]
@@ -292,7 +292,7 @@ fn pi_api_survives_oc_roundtrip_without_npm() {
     assert_eq!(out["api"], "anthropic-messages");
 }
 
-fn provider_from_row_npm(p: &aio_model_config::model::ProviderRow, npm: &str) -> serde_json::Value {
+fn provider_from_row_npm(p: &model_harbor::model::ProviderRow, npm: &str) -> serde_json::Value {
     // 模拟 ProviderRow::to_value 的 oc 输出（npm 为空时字段被移除）
     let mut m = serde_json::Map::new();
     let mut options = serde_json::Map::new();
