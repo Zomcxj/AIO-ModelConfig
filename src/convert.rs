@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 use std::collections::HashSet;
 
 /// 仅对 Anthropic 官方端点做 /v1 归一化；自定义代理 URL 原样保留。
-fn is_official_anthropic_url(url: &str) -> bool {
+pub(crate) fn is_official_anthropic_url(url: &str) -> bool {
     let u = url.trim_end_matches('/');
     u == "https://api.anthropic.com/v1" || u == "https://api.anthropic.com"
 }
@@ -22,19 +22,49 @@ pub fn api_to_npm(api: &str) -> String {
     match api {
         "anthropic-messages" => "@ai-sdk/anthropic".to_string(),
         "google-generative-ai" => "@ai-sdk/google".to_string(),
-        "openai-completions" | "openai-responses" => String::new(),
+        // 以下 api 无对应 @ai-sdk npm 包（opencode 侧回退默认兼容层）
+        "openai-completions" | "openai-responses" | "openai-codex-responses"
+        | "azure-openai-responses" | "bedrock-converse-stream" | "google-gemini-cli"
+        | "google-vertex" => String::new(),
         other => other.to_string(),
     }
+}
+
+/// 提取思考档位的“发送值”集合（逗号分隔）：
+/// - omp 方言：thinking.effortMap 的值（无 effortMap 时用 efforts）
+/// - pi 方言：thinkingLevelMap 的值
+fn thinking_values(v: &Value) -> String {
+    if let Some(t) = v.get("thinking") {
+        if let Some(em) = t.get("effortMap").and_then(|m| m.as_object()) {
+            return em
+                .values()
+                .filter_map(|val| val.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        if let Some(ef) = t.get("efforts").and_then(|a| a.as_array()) {
+            return ef
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        // thinking 块无 efforts/effortMap（如 budget 模式）→ 回落 thinkingLevelMap
+    }
+    v.get("thinkingLevelMap")
+        .and_then(|m| m.as_object())
+        .map(|obj| {
+            obj.values()
+                .map(|val| val.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
 }
 
 pub fn model_from_pi(v: &Value) -> ModelRow {
     let id = str_at(v, "id").to_string();
     let modalities_input = nested_list_str(v, &["input"]);
-    let thinking_level_map = v
-        .get("thinkingLevelMap")
-        .and_then(|m| m.as_object())
-        .map(|obj| obj.values().map(|val| val.as_str().unwrap_or("")).collect::<Vec<_>>().join(", "))
-        .unwrap_or_default();
     ModelRow {
         id: id.clone(),
         name: str_at(v, "name").to_string(),
@@ -45,7 +75,7 @@ pub fn model_from_pi(v: &Value) -> ModelRow {
         output: num_at(v, "maxTokens"),
         modalities_input,
         modalities_output: "text".to_string(),
-        variants: thinking_level_map,
+        variants: thinking_values(v),
         raw: v.clone(),
     }
 }
@@ -78,28 +108,50 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
-        // 若 raw 中已有 thinkingLevelMap 且其值集合与当前选择一致，则原样保留
-        // （保护 {"high":"max"} 这类非对称映射的键）
-        let raw_map = m.raw.get("thinkingLevelMap").and_then(|v| v.as_object());
-        let same_values = raw_map
-            .map(|rm| {
+        let cur: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+        let thinking_map: Map<String, Value> =
+            // 1) pi 方言原样保留：raw.thinkingLevelMap 值集合与当前选择一致
+            //    （保护 {"high":"max"} 这类非对称映射的键）
+            if let Some(rm) = m.raw.get("thinkingLevelMap").and_then(|v| v.as_object()) {
                 let rm_vals: HashSet<String> = rm
                     .values()
                     .filter_map(|v| v.as_str())
                     .map(|s| s.to_string())
                     .collect();
-                let cur: HashSet<String> =
-                    names.iter().map(|s| s.to_string()).collect();
-                rm_vals == cur
-            })
-            .unwrap_or(false);
-        let thinking_map: Map<String, Value> = if same_values {
-            raw_map.unwrap().clone()
-        } else {
+                if rm_vals == cur {
+                    rm.clone()
+                } else {
+                    Map::new()
+                }
+            }
+            // 2) omp 方言翻译：raw.thinking.effortMap 值集合一致 → 直接作为 thinkingLevelMap
+            else if let Some(em) = m
+                .raw
+                .get("thinking")
+                .and_then(|t| t.get("effortMap"))
+                .and_then(|v| v.as_object())
+            {
+                let em_vals: HashSet<String> = em
+                    .values()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect();
+                if em_vals == cur {
+                    em.clone()
+                } else {
+                    Map::new()
+                }
+            } else {
+                Map::new()
+            };
+        // 都不匹配 → 对称映射 {档位: 档位}
+        let thinking_map = if thinking_map.is_empty() {
             names
                 .iter()
                 .map(|n| (n.to_string(), Value::String(n.to_string())))
                 .collect()
+        } else {
+            thinking_map
         };
         if !thinking_map.is_empty() {
             obj.insert("thinkingLevelMap".into(), Value::Object(thinking_map));

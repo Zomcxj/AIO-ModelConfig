@@ -218,6 +218,7 @@ pub fn show_file_dialog() -> Option<String> {
     rfd::FileDialog::new()
         .set_title("选择配置文件")
         .add_filter("JSON", &["json", "jsonc"])
+        .add_filter("YAML", &["yml", "yaml"])
         .add_filter("所有文件", &["*"])
         .pick_file()
         .map(|p| p.to_string_lossy().to_string())
@@ -324,4 +325,17 @@ pub fn parse_config_content(content: &str) -> Result<serde_json::Value, String> 
     }
     let stripped = strip_jsonc_comments(content);
     serde_json::from_str(&stripped).map_err(|e| format!("解析失败: {}", e))
+}
+
+/// 解析 YAML 配置内容；空内容视为空对象。
+pub fn parse_yaml_content(content: &str) -> Result<serde_json::Value, String> {
+    if content.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_yaml_ng::from_str(content).map_err(|e| format!("解析失败: {}", e))
+}
+
+/// 将 Value 序列化为块风格 YAML 文本。
+pub fn to_yaml_string(value: &serde_json::Value) -> Result<String, String> {
+    serde_yaml_ng::to_string(value).map_err(|e| format!("序列化失败: {}", e))
 }

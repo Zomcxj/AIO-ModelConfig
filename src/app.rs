@@ -905,6 +905,11 @@ impl App {
                     "openai-responses",
                     "anthropic-messages",
                     "google-generative-ai",
+                    "openai-codex-responses",
+                    "azure-openai-responses",
+                    "bedrock-converse-stream",
+                    "google-gemini-cli",
+                    "google-vertex",
                 ];
                 let current_api = if p.pi_api.is_empty() {
                     convert::npm_to_api(&p.npm)
@@ -1226,6 +1231,11 @@ impl App {
                         "openai-responses",
                         "anthropic-messages",
                         "google-generative-ai",
+                        "openai-codex-responses",
+                        "azure-openai-responses",
+                        "bedrock-converse-stream",
+                        "google-gemini-cli",
+                        "google-vertex",
                     ];
                     let current_api = if self.new_provider.pi_api.is_empty() {
                         convert::npm_to_api(&self.new_provider.npm)
@@ -1581,10 +1591,7 @@ impl App {
             self.extras_for(fmt),
             target_root.as_ref(),
         );
-        let content = match self.save_format {
-            SaveFormat::Current => pretty_json(&root),
-            SaveFormat::Compact => compact_json(&root),
-        };
+        let content = backend.render(&root, self.save_format == SaveFormat::Compact)?;
         backends::write_config(path, &content)?;
         // 当前文件保存成功后，回填 opencode 的 extras 载体（self.root）保持与磁盘一致
         if is_current && fmt == ConfigFormat::Opencode {
@@ -1597,7 +1604,8 @@ impl App {
     fn extras_for(&self, fmt: ConfigFormat) -> &Value {
         match fmt {
             ConfigFormat::Opencode => &self.root,
-            ConfigFormat::PiAgent => &self.pi_extras,
+            // pi 系（pi-agent / oh-my-pi）共用 extras 载体：providers 之外的顶层字段
+            ConfigFormat::PiAgent | ConfigFormat::OhMyPi => &self.pi_extras,
         }
     }
 }
@@ -1612,7 +1620,7 @@ enum CompactRole {
     Target,
 }
 
-fn compact_json(root: &Value) -> String {
+pub(crate) fn compact_json(root: &Value) -> String {
     let mut lines = serialize_object(
         root.as_object().unwrap_or(&Map::new()),
         0,
@@ -1622,7 +1630,7 @@ fn compact_json(root: &Value) -> String {
     lines
 }
 
-fn pretty_json(root: &Value) -> String {
+pub(crate) fn pretty_json(root: &Value) -> String {
     let mut lines = serialize_pretty(
         root.as_object().unwrap_or(&Map::new()),
         0,

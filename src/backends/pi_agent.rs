@@ -96,4 +96,12 @@ impl Backend for PiAgentBackend {
             Err(_) => Value::Object(Map::new()),
         }
     }
+
+    fn render(&self, root: &Value, compact: bool) -> Result<String, String> {
+        Ok(if compact {
+            crate::app::compact_json(root)
+        } else {
+            crate::app::pretty_json(root)
+        })
+    }
 }

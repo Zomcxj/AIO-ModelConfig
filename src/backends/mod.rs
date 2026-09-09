@@ -11,6 +11,7 @@
 
 pub mod opencode;
 pub mod pi_agent;
+pub mod oh_my_pi;
 
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
@@ -71,10 +72,15 @@ pub trait Backend: Sync {
 
     /// 跨格式目标保存时读取目标现有 root（容错：读不到返回空对象）。
     fn load_target_root(&self, path: &str) -> Value;
+
+    /// root → 文件内容（opencode/pi 为 JSON 两种风格，omp 为 YAML；compact 对 YAML 无意义）。
+    fn render(&self, root: &Value, compact: bool) -> Result<String, String>;
 }
 
-/// 全部后端。**顺序即语义**：第 0 个是判别回落项，其余按"更具体优先"排列。
-pub static BACKENDS: &[&dyn Backend] = &[&opencode::BACKEND, &pi_agent::BACKEND];
+/// 全部后端。**顺序即语义**：第 0 个是判别回落项，其余按“更具体优先”排列
+/// （omp 在 pi 之前：.yml 扩展名优先归 omp，无扩展名时 JSON 语法内容让位给 pi）。
+pub static BACKENDS: &[&dyn Backend] =
+    &[&opencode::BACKEND, &oh_my_pi::BACKEND, &pi_agent::BACKEND];
 
 /// 按标识查找后端。
 pub fn backend(id: ConfigFormat) -> &'static dyn Backend {

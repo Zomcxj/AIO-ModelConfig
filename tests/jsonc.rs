@@ -79,6 +79,7 @@ fn target_path_prefers_local_when_exists() {
     let paths = ConfigPaths {
         opencode: p.to_string_lossy().to_string(),
         pi_agent: p.clone(),
+        oh_my_pi: p.clone(),
     };
     assert_eq!(
         paths.target_path(ConfigFormat::Opencode),

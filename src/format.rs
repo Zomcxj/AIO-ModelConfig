@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub enum ConfigFormat {
     Opencode,
     PiAgent,
+    OhMyPi,
 }
 
 impl ConfigFormat {
@@ -14,6 +15,7 @@ impl ConfigFormat {
         match self {
             ConfigFormat::Opencode => "opencode",
             ConfigFormat::PiAgent => "pi-agent",
+            ConfigFormat::OhMyPi => "oh-my-pi",
         }
     }
 }
@@ -22,13 +24,15 @@ impl ConfigFormat {
 pub struct ConfigPaths {
     pub opencode: String,
     pub pi_agent: PathBuf,
+    pub oh_my_pi: PathBuf,
 }
 
 impl Default for ConfigPaths {
     fn default() -> Self {
         let opencode = backends::backend(ConfigFormat::Opencode).default_local_path();
         let pi_agent = PathBuf::from(backends::backend(ConfigFormat::PiAgent).default_local_path());
-        Self { opencode, pi_agent }
+        let oh_my_pi = PathBuf::from(backends::backend(ConfigFormat::OhMyPi).default_local_path());
+        Self { opencode, pi_agent, oh_my_pi }
     }
 }
 
@@ -38,6 +42,7 @@ impl ConfigPaths {
         match format {
             ConfigFormat::Opencode => self.opencode.clone(),
             ConfigFormat::PiAgent => self.pi_agent.to_string_lossy().into_owned(),
+            ConfigFormat::OhMyPi => self.oh_my_pi.to_string_lossy().into_owned(),
         }
     }
 

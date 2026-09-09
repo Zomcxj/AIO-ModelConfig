@@ -114,6 +114,14 @@ impl Backend for OpenCodeBackend {
             Err(_) => Value::Object(Map::new()),
         }
     }
+
+    fn render(&self, root: &Value, compact: bool) -> Result<String, String> {
+        Ok(if compact {
+            crate::app::compact_json(root)
+        } else {
+            crate::app::pretty_json(root)
+        })
+    }
 }
 
 /// 将 UI 状态合并进 opencode 目标 root（跨格式保存用）：
