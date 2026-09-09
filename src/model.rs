@@ -15,7 +15,6 @@ pub struct AgentRow {
     pub color: String,
     pub system: String,
     pub raw: Value,
-    pub haystack: String,
 }
 
 impl Default for AgentRow {
@@ -36,15 +35,12 @@ impl AgentRow {
             color: str_at(v, "color").to_string(),
             system: str_at(v, "system").to_string(),
             raw: v.clone(),
-            haystack: String::new(),
         };
-        let mut row = row;
-        row.refresh_haystack();
         row
     }
 
     pub fn new() -> Self {
-        let mut r = Self {
+        Self {
             key: String::new(),
             mode: "subagent".into(),
             description: String::new(),
@@ -54,25 +50,9 @@ impl AgentRow {
             color: String::new(),
             system: String::new(),
             raw: Value::Object(Map::new()),
-            haystack: String::new(),
-        };
-        r.refresh_haystack();
-        r
+        }
     }
 
-    pub fn refresh_haystack(&mut self) {
-        let mut s = String::with_capacity(
-            self.key.len() + self.description.len() + self.model.len() + self.mode.len() + 4,
-        );
-        s.push_str(&self.key);
-        s.push(' ');
-        s.push_str(&self.mode);
-        s.push(' ');
-        s.push_str(&self.description);
-        s.push(' ');
-        s.push_str(&self.model);
-        self.haystack = s.to_lowercase();
-    }
 
     pub fn to_value(&self) -> Value {
         let mut m = self.raw.as_object().cloned().unwrap_or_default();
@@ -275,7 +255,6 @@ pub struct ProviderRow {
     pub new_model: ModelRow,
     pub raw: Value,
     pub pi_api: String,
-    pub haystack: String,
 }
 
 impl Default for ProviderRow {
@@ -296,7 +275,7 @@ impl ProviderRow {
             .and_then(|c| c.get("supportsDeveloperRole"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let mut r = Self {
+        Self {
             key: key.to_string(),
             description: str_at(v, "description").to_string(),
             npm: str_at(v, "npm").to_string(),
@@ -308,14 +287,11 @@ impl ProviderRow {
             new_model: ModelRow::new(),
             raw: v.clone(),
             pi_api: String::new(),
-            haystack: String::new(),
-        };
-        r.refresh_haystack();
-        r
+        }
     }
 
     pub fn new() -> Self {
-        let mut r = Self {
+        Self {
             key: String::new(),
             description: String::new(),
             npm: String::new(),
@@ -327,23 +303,9 @@ impl ProviderRow {
             new_model: ModelRow::new(),
             raw: Value::Object(Map::new()),
             pi_api: String::new(),
-            haystack: String::new(),
-        };
-        r.refresh_haystack();
-        r
+        }
     }
 
-    pub fn refresh_haystack(&mut self) {
-        let mut s = String::with_capacity(
-            self.key.len() + self.description.len() + self.base_url.len() + 3,
-        );
-        s.push_str(&self.key);
-        s.push(' ');
-        s.push_str(&self.description);
-        s.push(' ');
-        s.push_str(&self.base_url);
-        self.haystack = s.to_lowercase();
-    }
 
     pub fn to_value(&self) -> Value {
         let mut m = self.raw.as_object().cloned().unwrap_or_default();

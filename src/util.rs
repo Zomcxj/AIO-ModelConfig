@@ -3,6 +3,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// 构造 wsl 命令：Windows 下带 CREATE_NO_WINDOW，
+/// 避免 GUI 程序拉起控制台进程（wsl.exe）时闪现终端窗口。
+fn wsl_command() -> Command {
+    let mut cmd = Command::new("wsl");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 pub fn str_at<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(|x| x.as_str()).unwrap_or_default()
 }
@@ -138,7 +150,7 @@ pub fn is_wsl_path(path: &str) -> bool {
 }
 
 pub fn wsl_home() -> Option<String> {
-    let out = Command::new("wsl")
+    let out = wsl_command()
         .args(["-e", "sh", "-c", "printf %s \"$HOME\""])
         .output()
         .ok()?;
@@ -158,14 +170,14 @@ fn shell_quote(s: &str) -> String {
 }
 
 pub fn wsl_path_exists(path: &str) -> bool {
-    let out = Command::new("wsl")
+    let out = wsl_command()
         .args(["-e", "sh", "-c", &format!("test -e {} && echo y", shell_quote(path))])
         .output();
     matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }
 
 pub fn wsl_file_exists(path: &str) -> bool {
-    let out = Command::new("wsl")
+    let out = wsl_command()
         .args(["-e", "sh", "-c", &format!("test -f {} && echo y", shell_quote(path))])
         .output();
     matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
@@ -183,7 +195,7 @@ pub fn win_to_wsl(path: &str) -> String {
 }
 
 pub fn read_wsl_file(path: &str) -> Result<String, String> {
-    let out = Command::new("wsl")
+    let out = wsl_command()
         .args(["cat", path])
         .output()
         .map_err(|e| format!("wsl 命令失败: {}", e))?;
@@ -202,7 +214,7 @@ pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
     fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().replace('\\', "/");
     let tmp_wsl = win_to_wsl(&tmp_str);
-    let out = Command::new("wsl")
+    let out = wsl_command()
         .args(["cp", &tmp_wsl, path])
         .output()
         .map_err(|e| format!("wsl 命令失败: {}", e))?;
@@ -338,4 +350,15 @@ pub fn parse_yaml_content(content: &str) -> Result<serde_json::Value, String> {
 /// 将 Value 序列化为块风格 YAML 文本。
 pub fn to_yaml_string(value: &serde_json::Value) -> Result<String, String> {
     serde_yaml_ng::to_string(value).map_err(|e| format!("序列化失败: {}", e))
+}
+
+/// WSL 侧路径的父目录是否存在（"已安装" 判定：配置文件或其目录存在即可）。
+pub fn wsl_parent_dir_exists(path: &str) -> bool {
+    let Some((dir, _)) = path.rsplit_once('/') else {
+        return false;
+    };
+    let out = wsl_command()
+        .args(["-e", "sh", "-c", &format!("test -d {} && echo y", shell_quote(dir))])
+        .output();
+    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }

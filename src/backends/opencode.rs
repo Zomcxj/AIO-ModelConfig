@@ -6,7 +6,9 @@
 use super::{Backend, BackendLoad};
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
-use crate::util::{parse_config_content, read_config_content, wsl_file_exists, wsl_home};
+use crate::util::{
+    parse_config_content, read_config_content, wsl_file_exists, wsl_home, wsl_parent_dir_exists,
+};
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -43,7 +45,8 @@ impl Backend for OpenCodeBackend {
     }
 
     fn wsl_available(&self, wsl_path: &str) -> bool {
-        wsl_file_exists(wsl_path)
+        // 已安装判定：配置文件或其目录存在
+        wsl_file_exists(wsl_path) || wsl_parent_dir_exists(wsl_path)
     }
 
     fn detect(&self, content: &str, _path: &str) -> bool {

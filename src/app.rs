@@ -4,7 +4,7 @@ use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
 use crate::ui::{card_frame, card_grid, DragHandle, move_item};
-use crate::util::show_file_dialog;
+use crate::util::{is_wsl_path, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -30,7 +30,6 @@ struct SaveTarget {
     backend: ConfigFormat,
     available: bool,
     path: String,
-    enabled: bool,
 }
 
 pub struct App {
@@ -41,7 +40,6 @@ pub struct App {
     new_provider: ProviderRow,
     config_path: String,
     status: String,
-    filter: String,
     show_new_agent: bool,
     show_new_provider: bool,
     agent_open: HashSet<String>,
@@ -55,9 +53,10 @@ pub struct App {
     save_format: SaveFormat,
     source_format: ConfigFormat,
     config_paths: ConfigPaths,
-    save_current: bool,
     targets: Vec<SaveTarget>,
-    provider_view_opencode: bool,
+    current_page: ConfigFormat,
+    sync_wsl: bool,
+    wsl_any_installed: bool,
     show_agents_section: bool,
     show_providers_section: bool,
     load_error: Option<String>,
@@ -79,7 +78,6 @@ impl Default for App {
             new_provider: ProviderRow::new(),
             config_path: path,
             status: String::new(),
-            filter: String::new(),
             show_new_agent: false,
             show_new_provider: false,
             agent_open: HashSet::new(),
@@ -93,9 +91,10 @@ impl Default for App {
             save_format: SaveFormat::default(),
             source_format: format,
             config_paths: paths,
-            save_current: true,
             targets: Vec::new(),
-            provider_view_opencode: format == ConfigFormat::Opencode,
+            current_page: format,
+            sync_wsl: false,
+            wsl_any_installed: false,
             show_agents_section: true,
             show_providers_section: true,
             load_error: None,
@@ -138,13 +137,17 @@ impl eframe::App for App {
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
+            self.ui_page_header(ui);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .drag_to_scroll(false)
                 .show(ui, |ui| {
                     ui.add_space(4.0);
-                    self.ui_agents_section(ui);
-                    ui.add_space(8.0);
+                    // Agents 仅属于 opencode 页面
+                    if self.current_page == ConfigFormat::Opencode {
+                        self.ui_agents_section(ui);
+                        ui.add_space(8.0);
+                    }
                     self.ui_providers_section(ui);
                     ui.add_space(8.0);
                 });
@@ -168,10 +171,13 @@ impl App {
                     backend: id,
                     available: self.config_paths.validate_target(id),
                     path: self.config_paths.target_path(id),
-                    enabled: false,
                 }
             })
             .collect();
+        // WSL 侧是否有任一 agent 已安装（供 WSL 同步按钮可用性判断）
+        self.wsl_any_installed = backends::BACKENDS
+            .iter()
+            .any(|b| backends::wsl_target(b.id()).is_some());
     }
 
     /// 按 source_format 加载当前 config_path；失败时置空数据并记录 load_error。
@@ -203,13 +209,79 @@ impl App {
         }
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
-        self.save_current = true;
+        // 加载后跳转到来源格式对应的页面
+        self.current_page = self.source_format;
         self.refresh_targets();
     }
 
     fn ui_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.style_mut().spacing.interact_size.y = 18.0;
+            // 第一行：页面切换 / 来源 / 右侧 WSL 同步 + 主题
+            ui.horizontal(|ui| {
+                let icons: Vec<Option<egui::TextureHandle>> = self.backend_icons.clone();
+                for (i, b) in backends::BACKENDS.iter().enumerate() {
+                    let id = b.id();
+                    let btn = match icons.get(i).and_then(|o| o.as_ref()) {
+                        Some(tex) => egui::Button::image_and_text(
+                            egui::Image::from_texture(tex)
+                                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                            id.label(),
+                        ),
+                        None => egui::Button::new(id.label()),
+                    };
+                    if ui.add(btn.selected(self.current_page == id)).clicked() {
+                        self.current_page = id;
+                    }
+                }
+                ui.separator();
+                if let Some(icon) = self.icon_for(self.source_format) {
+                    ui.add(
+                        egui::Image::from_texture(icon)
+                            .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                    );
+                }
+                ui.label(
+                    egui::RichText::new(format!("来源: {}", self.source_format.label()))
+                        .weak(),
+                );
+                // 右侧：WSL 同步 + 主题
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let wsl_tip = if self.wsl_any_installed {
+                        "保存时同步更新 WSL 侧已安装 agent 的配置"
+                    } else {
+                        "WSL 中未发现任何 agent（配置文件或其目录均不存在）"
+                    };
+                    ui.add_enabled(
+                        self.wsl_any_installed,
+                        egui::Checkbox::new(&mut self.sync_wsl, "WSL同步"),
+                    )
+                    .on_hover_text(wsl_tip);
+                    ui.separator();
+                    ui.label("主题:");
+                    let theme_btn = ui.button(self.theme.label());
+                    let popup_id = ui.make_persistent_id("theme_popup");
+                    if theme_btn.clicked() {
+                        ui.memory_mut(|m| m.toggle_popup(popup_id));
+                    }
+                    egui::popup_below_widget(
+                        ui,
+                        popup_id,
+                        &theme_btn,
+                        egui::PopupCloseBehavior::CloseOnClick,
+                        |ui| {
+                            ui.set_min_width(80.0);
+                            for t in Theme::ALL {
+                                if ui.selectable_label(self.theme == t, t.label()).clicked() {
+                                    self.theme = t;
+                                    t.apply(ctx);
+                                }
+                            }
+                        },
+                    );
+                });
+            });
+            // 第二行：配置文件 / 保存格式
             ui.horizontal(|ui| {
                 ui.label("配置文件:");
                 ui.add(
@@ -221,16 +293,14 @@ impl App {
                         self.reload();
                     }
                 }
-                if ui.button("保存").clicked() {
-                    self.save();
-                }
                 ui.separator();
                 ui.label("保存格式:");
                 let format_btn = ui.button(self.save_format.label());
                 if format_btn.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                let scroll = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. })));
+                let scroll = ui
+                    .input(|i| i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. })));
                 if scroll && format_btn.hovered() {
                     self.save_format = match self.save_format {
                         SaveFormat::Current => SaveFormat::Compact,
@@ -243,62 +313,6 @@ impl App {
                         SaveFormat::Compact => SaveFormat::Current,
                     };
                 }
-                ui.separator();
-                ui.label("保存位置:");
-                ui.checkbox(&mut self.save_current, "当前文件")
-                    .on_hover_text(format!("写入: {}", self.config_path));
-                let icons: Vec<Option<egui::TextureHandle>> = self.backend_icons.clone();
-                for (t, icon) in self.targets.iter_mut().zip(icons.iter()) {
-                    if let Some(tex) = icon {
-                        ui.add(
-                            egui::Image::from_texture(tex)
-                                .fit_to_exact_size(egui::vec2(14.0, 14.0)),
-                        );
-                    }
-                    let label = t.backend.label();
-                    let tip = format!("写入: {}", t.path);
-                    ui.add_enabled(t.available, egui::Checkbox::new(&mut t.enabled, label))
-                        .on_hover_text(tip);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("主题:");
-                let theme_btn = ui.button(self.theme.label());
-                let popup_id = ui.make_persistent_id("theme_popup");
-                if theme_btn.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(popup_id));
-                }
-                egui::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &theme_btn,
-                    egui::PopupCloseBehavior::CloseOnClick,
-                    |ui| {
-                        ui.set_min_width(80.0);
-                        for t in Theme::ALL {
-                            if ui.selectable_label(self.theme == t, t.label()).clicked() {
-                                self.theme = t;
-                                t.apply(ctx);
-                            }
-                        }
-                    },
-                );
-                ui.separator();
-                ui.label("搜索:");
-                ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(160.0));
-                if ui.button("清空").clicked() {
-                    self.filter.clear();
-                }
-                ui.separator();
-                if let Some(icon) = self.icon_for(self.source_format) {
-                    ui.add(
-                        egui::Image::from_texture(icon)
-                            .fit_to_exact_size(egui::vec2(12.0, 12.0)),
-                    );
-                }
-                ui.label(
-                    egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
-                );
             });
         });
     }
@@ -358,19 +372,7 @@ impl App {
             return;
         }
 
-        let f = self.filter.to_lowercase();
-        let matched: Vec<usize> = self
-            .agents
-            .iter()
-            .enumerate()
-            .filter_map(|(i, a)| {
-                if f.is_empty() || a.haystack.contains(&f) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let matched: Vec<usize> = (0..self.agents.len()).collect();
 
         if self.agents.is_empty() && !self.show_new_agent {
             self.show_new_agent = true;
@@ -380,7 +382,7 @@ impl App {
         let mut to_copy: Option<usize> = None;
         let mut hover_target: Option<String> = None;
         card_grid(ui, &matched, 1, 0.0, |ui, idx| {
-            self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &f, &mut hover_target);
+            self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
         });
         if let Some(idx) = to_remove {
             self.agents.remove(idx);
@@ -389,7 +391,6 @@ impl App {
         if let Some(idx) = to_copy {
             let mut a = self.agents[idx].clone();
             a.key = format!("{}_copy", a.key);
-            a.refresh_haystack();
             self.agents.push(a);
             self.status = "已复制 agent".into();
         }
@@ -414,7 +415,6 @@ impl App {
         idx: usize,
         to_remove: &mut Option<usize>,
         to_copy: &mut Option<usize>,
-        _filter: &str,
         hover_target: &mut Option<String>,
     ) {
         let key = self.agents[idx].key.clone();
@@ -574,7 +574,6 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut a.system).desired_width(450.0));
         });
         if a.key != prev_key || a.description != prev_desc || a.model != prev_model || a.mode != prev_mode {
-            a.refresh_haystack();
         }
     }
 
@@ -699,8 +698,7 @@ impl App {
                 ui.add_space(60.0);
                 if ui.button("确认").clicked() {
                     if !self.new_agent.key.trim().is_empty() {
-                        let mut na = self.new_agent.clone();
-                        na.refresh_haystack();
+                        let na = self.new_agent.clone();
                         self.agents.push(na);
                         self.new_agent = AgentRow::new();
                         self.show_new_agent = false;
@@ -741,15 +739,6 @@ impl App {
                     }
                 }
             }
-            let oc_label = if self.provider_view_opencode { "opencode" } else { "pi-agent" };
-            let oc_color = if self.provider_view_opencode {
-                egui::Color32::from_rgb(100, 200, 100)
-            } else {
-                egui::Color32::from_rgb(200, 100, 100)
-            };
-            if ui.button(egui::RichText::new(format!("切换: {}", oc_label)).color(oc_color)).clicked() {
-                self.provider_view_opencode = !self.provider_view_opencode;
-            }
         });
         ui.separator();
 
@@ -757,19 +746,7 @@ impl App {
             return;
         }
 
-        let f = self.filter.to_lowercase();
-        let matched: Vec<usize> = self
-            .providers
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                if f.is_empty() || p.haystack.contains(&f) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let matched: Vec<usize> = (0..self.providers.len()).collect();
 
         if self.providers.is_empty() && !self.show_new_provider {
             self.show_new_provider = true;
@@ -779,7 +756,7 @@ impl App {
         let mut to_copy: Option<usize> = None;
         let mut hover_target: Option<String> = None;
         card_grid(ui, &matched, 1, 0.0, |ui, idx| {
-            self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &f, &mut hover_target);
+            self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
         });
         if let Some(idx) = to_remove {
             self.providers.remove(idx);
@@ -788,7 +765,6 @@ impl App {
         if let Some(idx) = to_copy {
             let mut p = self.providers[idx].clone();
             p.key = format!("{}_copy", p.key);
-            p.refresh_haystack();
             self.providers.push(p);
             self.status = "已复制 provider".into();
         }
@@ -813,7 +789,6 @@ impl App {
         idx: usize,
         to_remove: &mut Option<usize>,
         to_copy: &mut Option<usize>,
-        _filter: &str,
         hover_target: &mut Option<String>,
     ) {
         let key = self.providers[idx].key.clone();
@@ -883,22 +858,37 @@ impl App {
 
     fn render_provider_form(&mut self, ui: &mut egui::Ui, idx: usize) {
         let p = &mut self.providers[idx];
-        let show_oc = self.provider_view_opencode;
+        let show_oc = self.current_page == ConfigFormat::Opencode;
+        let show_omp = self.current_page == ConfigFormat::OhMyPi;
         let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
         let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
-        let timeout_label = if show_oc { "options.timeout" } else { "timeout" };        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
+        let timeout_label = "options.timeout";
+        let context_label = if show_oc { "limit.context" } else { "contextWindow" };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
-        let output_mod_label = if show_oc { "modalities.output" } else { "(无)" };
-        let variants_label = if show_oc { "variants" } else { "thinkingLevelMap" };
+        // 思考档位：三方言各不相同
+        let variants_label = match self.current_page {
+            ConfigFormat::Opencode => "variants",
+            ConfigFormat::PiAgent => "thinkingLevelMap",
+            ConfigFormat::OhMyPi => "thinking.efforts",
+        };
+        let variant_names: &[&str] = match self.current_page {
+            ConfigFormat::Opencode => &["none", "low", "medium", "high", "xhigh", "max", "ultra"],
+            ConfigFormat::PiAgent => &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            ConfigFormat::OhMyPi => &["minimal", "low", "medium", "high", "xhigh", "max"],
+        };
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
             ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("description").weak()),
-            );
-            ui.add(egui::TextEdit::singleline(&mut p.description).desired_width(450.0));
+            if show_oc {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("description").weak()),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut p.description).desired_width(450.0),
+                );
+            }
             if show_oc {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
                 let npm_options = [
@@ -932,17 +922,33 @@ impl App {
             }
             if !show_oc {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("api").weak()));
-                let api_options = [
-                    "openai-completions",
-                    "openai-responses",
-                    "anthropic-messages",
-                    "google-generative-ai",
-                    "openai-codex-responses",
-                    "azure-openai-responses",
-                    "bedrock-converse-stream",
-                    "google-gemini-cli",
-                    "google-vertex",
-                ];
+                // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
+                let api_options: &[&str] = if show_omp {
+                    &[
+                        "openai-completions",
+                        "openai-responses",
+                        "openai-codex-responses",
+                        "azure-openai-responses",
+                        "anthropic-messages",
+                        "bedrock-converse-stream",
+                        "google-generative-ai",
+                        "google-gemini-cli",
+                        "google-vertex",
+                    ]
+                } else {
+                    &[
+                        "openai-completions",
+                        "mistral-conversations",
+                        "openai-responses",
+                        "azure-openai-responses",
+                        "openai-codex-responses",
+                        "anthropic-messages",
+                        "bedrock-converse-stream",
+                        "google-generative-ai",
+                        "google-vertex",
+                        "pi-messages",
+                    ]
+                };
                 let current_api = if p.pi_api.is_empty() {
                     convert::npm_to_api(&p.npm)
                 } else {
@@ -952,7 +958,7 @@ impl App {
                     .selected_text(&current_api)
                     .width(180.0)
                     .show_ui(ui, |ui| {
-                        for api in api_options {
+                        for &api in api_options {
                             let is_selected = current_api == api;
                             if ui.selectable_label(is_selected, api).clicked() {
                                 p.pi_api = api.to_string();
@@ -1026,21 +1032,20 @@ impl App {
                     egui::TextEdit::singleline(&mut p.models[j].modalities_input)
                         .desired_width(80.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(output_mod_label).weak()),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut p.models[j].modalities_output)
-                        .desired_width(80.0),
-                );
+                if show_oc {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("modalities.output").weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.models[j].modalities_output)
+                            .desired_width(80.0),
+                    );
+                }
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(variants_label).weak()),
                 );
-                let variant_names = [
-                    "none", "low", "medium", "high", "xhigh", "max", "ultra",
-                ];
                 let current_variants = p.models[j].variants.clone();
                 let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                     Vec::new()
@@ -1066,7 +1071,7 @@ impl App {
                     }
                 }
                 if is_open {
-                    for vn in &variant_names {
+                    for vn in variant_names {
                         let mut checked = selected_variants.contains(&vn.to_string());
                         if ui.checkbox(&mut checked, *vn).changed() {
                             if checked {
@@ -1133,21 +1138,20 @@ impl App {
                     egui::TextEdit::singleline(&mut p.new_model.modalities_input)
                         .desired_width(80.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(output_mod_label).weak()),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut p.new_model.modalities_output)
-                        .desired_width(80.0),
-                );
+                if show_oc {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("modalities.output").weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.new_model.modalities_output)
+                            .desired_width(80.0),
+                    );
+                }
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(variants_label).weak()),
                 );
-                let variant_names = [
-                    "none", "low", "medium", "high", "xhigh", "max", "ultra",
-                ];
                 let current_variants = p.new_model.variants.clone();
                 let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                     Vec::new()
@@ -1173,7 +1177,7 @@ impl App {
                     }
                 }
                 if is_open {
-                    for vn in &variant_names {
+                    for vn in variant_names {
                         let mut checked = selected_variants.contains(&vn.to_string());
                         if ui.checkbox(&mut checked, *vn).changed() {
                             if checked {
@@ -1200,15 +1204,25 @@ impl App {
     }
 
     fn ui_new_provider_form(&mut self, ui: &mut egui::Ui) {
-        let show_oc = self.provider_view_opencode;
+        let show_oc = self.current_page == ConfigFormat::Opencode;
+        let show_omp = self.current_page == ConfigFormat::OhMyPi;
         let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
         let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
-        let timeout_label = if show_oc { "options.timeout" } else { "timeout" };
+        let timeout_label = "options.timeout";
         let context_label = if show_oc { "limit.context" } else { "contextWindow" };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
-        let output_mod_label = if show_oc { "modalities.output" } else { "(无)" };
-        let variants_label = if show_oc { "variants" } else { "thinkingLevelMap" };
+        // 思考档位：三方言各不相同
+        let variants_label = match self.current_page {
+            ConfigFormat::Opencode => "variants",
+            ConfigFormat::PiAgent => "thinkingLevelMap",
+            ConfigFormat::OhMyPi => "thinking.efforts",
+        };
+        let variant_names: &[&str] = match self.current_page {
+            ConfigFormat::Opencode => &["none", "low", "medium", "high", "xhigh", "max", "ultra"],
+            ConfigFormat::PiAgent => &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            ConfigFormat::OhMyPi => &["minimal", "low", "medium", "high", "xhigh", "max"],
+        };
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
@@ -1217,15 +1231,17 @@ impl App {
                         .hint_text("openai")
                         .desired_width(120.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("description").weak()),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_provider.description)
-                        .hint_text("简要描述此 provider")
-                        .desired_width(450.0),
-                );
+                if show_oc {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("description").weak()),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.description)
+                            .hint_text("简要描述此 provider")
+                            .desired_width(450.0),
+                    );
+                }
                 if show_oc {
                     ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("npm").weak()));
                     let npm_options = [
@@ -1258,17 +1274,33 @@ impl App {
                 }
                 if !show_oc {
                     ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("api").weak()));
-                    let api_options = [
-                        "openai-completions",
-                        "openai-responses",
-                        "anthropic-messages",
-                        "google-generative-ai",
-                        "openai-codex-responses",
-                        "azure-openai-responses",
-                        "bedrock-converse-stream",
-                        "google-gemini-cli",
-                        "google-vertex",
-                    ];
+                    // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
+                    let api_options: &[&str] = if show_omp {
+                        &[
+                            "openai-completions",
+                            "openai-responses",
+                            "openai-codex-responses",
+                            "azure-openai-responses",
+                            "anthropic-messages",
+                            "bedrock-converse-stream",
+                            "google-generative-ai",
+                            "google-gemini-cli",
+                            "google-vertex",
+                        ]
+                    } else {
+                        &[
+                            "openai-completions",
+                            "mistral-conversations",
+                            "openai-responses",
+                            "azure-openai-responses",
+                            "openai-codex-responses",
+                            "anthropic-messages",
+                            "bedrock-converse-stream",
+                            "google-generative-ai",
+                            "google-vertex",
+                            "pi-messages",
+                        ]
+                    };
                     let current_api = if self.new_provider.pi_api.is_empty() {
                         convert::npm_to_api(&self.new_provider.npm)
                     } else {
@@ -1278,7 +1310,7 @@ impl App {
                         .selected_text(&current_api)
                         .width(180.0)
                         .show_ui(ui, |ui| {
-                            for api in api_options {
+                            for &api in api_options {
                                 let is_selected = current_api == api;
                                 if ui.selectable_label(is_selected, api).clicked() {
                                     self.new_provider.pi_api = api.to_string();
@@ -1402,18 +1434,17 @@ impl App {
                         egui::Label::new(egui::RichText::new(input_label).weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_input).desired_width(80.0));
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(output_mod_label).weak()),
-                    );
-                    ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_output).desired_width(80.0));
+                    if show_oc {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new("modalities.output").weak()),
+                        );
+                        ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.modalities_output).desired_width(80.0));
+                    }
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(variants_label).weak()),
                     );
-                    let variant_names = [
-                        "none", "low", "medium", "high", "xhigh", "max", "ultra",
-                    ];
                     let current_variants = self.new_provider.new_model.variants.clone();
                     let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                         Vec::new()
@@ -1422,7 +1453,7 @@ impl App {
                     };
                     let display = if selected_variants.is_empty() { "选择..." } else { &current_variants };
                     let _ = ui.button(display);
-                    for vn in &variant_names {
+                    for vn in variant_names {
                         let mut checked = selected_variants.contains(&vn.to_string());
                         if ui.checkbox(&mut checked, *vn).changed() {
                             if checked {
@@ -1453,8 +1484,7 @@ impl App {
                 ui.add_space(60.0);
                 if ui.button("确认").clicked() {
                     if !self.new_provider.key.trim().is_empty() {
-                        let mut np = self.new_provider.clone();
-                        np.refresh_haystack();
+                        let np = self.new_provider.clone();
                         self.providers.push(np);
                         self.new_provider = ProviderRow::new();
                         self.show_new_provider = false;
@@ -1560,52 +1590,97 @@ impl App {
         None
     }
 
-    fn save(&mut self) {
-        if !self.save_current && !self.targets.iter().any(|t| t.enabled) {
-            self.status = "请先选择保存目标".into();
-            return;
+    /// 本页写入路径：当前文件属于本页格式时写当前文件，否则写该后端默认目标
+    /// （本地优先，WSL 回落）。
+    fn page_save_path(&self, fmt: ConfigFormat) -> (String, bool) {
+        if self.source_format == fmt && !self.config_path.is_empty() {
+            (self.config_path.clone(), true)
+        } else {
+            let path = self
+                .targets
+                .iter()
+                .find(|t| t.backend == fmt)
+                .map(|t| t.path.clone())
+                .unwrap_or_default();
+            (path, false)
         }
+    }
+
+    /// 页头：本页保存按钮 + 写入路径。
+    fn ui_page_header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let fmt = self.current_page;
+            let (path, is_current) = self.page_save_path(fmt);
+            let target_ok = self.targets.iter().any(|t| t.backend == fmt && t.available);
+            let can_save = is_current || target_ok;
+            if ui
+                .add_enabled(
+                    can_save,
+                    egui::Button::new(
+                        egui::RichText::new("保存").strong(),
+                    ),
+                )
+                .clicked()
+            {
+                self.save_page(fmt);
+            }
+            let kind = if is_current {
+                "当前文件"
+            } else {
+                "默认目标（本地优先，WSL 回落）"
+            };
+            if let Some(icon) = self.icon_for(fmt) {
+                ui.add(
+                    egui::Image::from_texture(icon)
+                        .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                );
+            }
+            ui.label(
+                egui::RichText::new(format!("写入: {}", path)).weak(),
+            )
+            .on_hover_text(kind);
+        });
+        ui.separator();
+    }
+
+    /// 保存当前页面：写入该页格式对应的路径，并按需同步 WSL。
+    fn save_page(&mut self, fmt: ConfigFormat) {
         if let Some(dup) = self.find_duplicate_keys() {
             self.status = format!("key 重复: {}，已取消保存", dup);
             return;
         }
-        let mut status_parts = Vec::new();
-        if self.save_current {
-            if self.config_path.is_empty() {
-                status_parts.push("当前文件: 没有打开的文件".to_string());
-            } else if let Some(err) = self.load_error.clone() {
-                status_parts.push(format!("当前文件: 加载失败({})，已跳过", err));
-            } else {
-                let fmt = self.source_format;
-                let path = self.config_path.clone();
-                let res = self.save_backend_to(fmt, &path);
-                status_parts.push(match res {
-                    Ok(()) => "当前文件: 已保存".to_string(),
-                    Err(e) => format!("当前文件: 保存失败({})", e),
-                });
+        let (path, is_current) = self.page_save_path(fmt);
+        if is_current {
+            if let Some(err) = self.load_error.clone() {
+                self.status = format!("当前文件: 加载失败({})，已跳过", err);
+                return;
+            }
+        } else if !self.targets.iter().any(|t| t.backend == fmt && t.available) {
+            self.status = format!(
+                "{}: 未安装（本地与 WSL 均未找到配置）",
+                fmt.label()
+            );
+            return;
+        }
+        let res = self.save_backend_to(fmt, &path);
+        let ok = res.is_ok();
+        self.status = match res {
+            Ok(()) => format!("{}: 已保存", fmt.label()),
+            Err(e) => format!("{}: 保存失败({})", fmt.label(), e),
+        };
+        // WSL 同步：写入路径为本地时，同步到 WSL 侧默认路径（仅 WSL 中已安装的 agent）
+        if self.sync_wsl && ok && !is_wsl_path(&path) {
+            if let Some(wsl_path) = backends::wsl_target(fmt) {
+                match self.save_backend_to(fmt, &wsl_path) {
+                    Ok(()) => self
+                        .status
+                        .push_str(&format!("; {}(WSL): 已同步", fmt.label())),
+                    Err(e) => self
+                        .status
+                        .push_str(&format!("; {}(WSL): 同步失败({})", fmt.label(), e)),
+                }
             }
         }
-        let snapshot: Vec<(ConfigFormat, String, bool, bool)> = self
-            .targets
-            .iter()
-            .map(|t| (t.backend, t.path.clone(), t.available, t.enabled))
-            .collect();
-        for (fmt, path, available, enabled) in snapshot {
-            if !enabled {
-                continue;
-            }
-            if !available {
-                status_parts
-                    .push(format!("{}: 未安装（本地与 WSL 均未找到配置）", fmt.label()));
-                continue;
-            }
-            let res = self.save_backend_to(fmt, &path);
-            status_parts.push(match res {
-                Ok(()) => format!("{}: 已保存", fmt.label()),
-                Err(e) => format!("{}: 保存失败({})", fmt.label(), e),
-            });
-        }
-        self.status = status_parts.join("; ");
     }
 
     /// 通用保存：按后端构造 root、渲染内容并写入。

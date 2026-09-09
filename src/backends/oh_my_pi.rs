@@ -14,7 +14,7 @@ use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::util::{
     parse_config_content, parse_yaml_content, read_config_content, to_yaml_string, wsl_home,
-    wsl_path_exists,
+    wsl_parent_dir_exists, wsl_path_exists,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -229,7 +229,8 @@ impl Backend for OhMyPiBackend {
     }
 
     fn wsl_available(&self, wsl_path: &str) -> bool {
-        wsl_path_exists(wsl_path)
+        // 已安装判定：配置文件或其目录存在
+        wsl_path_exists(wsl_path) || wsl_parent_dir_exists(wsl_path)
     }
 
     fn detect(&self, content: &str, path: &str) -> bool {

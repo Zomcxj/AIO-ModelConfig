@@ -174,7 +174,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         .and_then(|c| c.get("supportsDeveloperRole"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let mut r = ProviderRow {
+    let r = ProviderRow {
         key: key.to_string(),
         description: String::new(),
         npm,
@@ -186,9 +186,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         new_model: ModelRow::new(),
         raw: v.clone(),
         pi_api: api.to_string(),
-        haystack: String::new(),
     };
-    r.refresh_haystack();
     r
 }
 
