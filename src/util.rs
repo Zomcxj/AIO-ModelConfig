@@ -264,6 +264,20 @@ pub fn wsl_file_exists(path: &str) -> bool {
     matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }
 
+pub fn remove_config(path: &str) -> Result<(), String> {
+    if is_wsl_path(path) {
+        let out = wsl_command()
+            .args(["-e", "sh", "-c", &format!("rm -f -- {}", shell_quote(path))])
+            .output()
+            .map_err(|e| format!("wsl 命令失败: {}", e))?;
+        if !out.status.success() {
+            return Err(format!("wsl 删除失败: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(())
+    } else {
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
 pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
     let tmp: PathBuf = std::env::temp_dir().join(format!(
         "model_harbor_tmp_{}.json",
@@ -370,6 +384,16 @@ fn remove_trailing_commas(input: &str) -> String {
     }
     out
 }
+
+/// 读取配置文件内容（支持本地与 WSL 路径）；不存在返回空串。
+pub fn config_exists(path: &str) -> bool {
+    if is_wsl_path(path) {
+        wsl_file_exists(path)
+    } else {
+        Path::new(path).is_file()
+    }
+}
+
 
 /// 读取配置文件内容（支持本地与 WSL 路径）；不存在返回空串。
 pub fn read_config_content(path: &str) -> Result<String, String> {

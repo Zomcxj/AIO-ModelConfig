@@ -6,5 +6,6 @@ pub mod theme;
 pub mod format;
 pub mod convert;
 pub mod backends;
+pub mod credentials;
 #[cfg(target_os = "windows")]
 pub mod cursor;

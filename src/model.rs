@@ -260,6 +260,10 @@ pub struct ProviderRow {
     pub npm: String,
     pub base_url: String,
     pub api_key: String,
+    /// DSH 中保存于主配置的凭据引用名（apiKeyEnv）。
+    pub api_key_env: String,
+    /// DSH 同级 `.credentials.yaml` 中 refs 下的实际密钥。
+    pub api_key_secret: String,
     pub timeout: String,
     pub compat: bool,
     pub models: Vec<ModelRow>,
@@ -292,6 +296,8 @@ impl ProviderRow {
             npm: str_at(v, "npm").to_string(),
             base_url: nested_str(v, &["options", "baseURL"]).to_string(),
             api_key: nested_str(v, &["options", "apiKey"]).to_string(),
+            api_key_env: String::new(),
+            api_key_secret: String::new(),
             timeout: nested_num(v, &["options", "timeout"]),
             compat,
             models,
@@ -308,6 +314,8 @@ impl ProviderRow {
             npm: String::new(),
             base_url: String::new(),
             api_key: String::new(),
+            api_key_env: String::new(),
+            api_key_secret: String::new(),
             timeout: String::new(),
             compat: true,
             models: Vec::new(),

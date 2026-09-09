@@ -8,6 +8,7 @@ pub enum ConfigFormat {
     Opencode,
     PiAgent,
     OhMyPi,
+    DeepSeekHarness,
 }
 
 impl ConfigFormat {
@@ -16,6 +17,7 @@ impl ConfigFormat {
             ConfigFormat::Opencode => "opencode",
             ConfigFormat::PiAgent => "pi-agent",
             ConfigFormat::OhMyPi => "oh-my-pi",
+            ConfigFormat::DeepSeekHarness => "deepseek-harness",
         }
     }
 }
@@ -25,6 +27,7 @@ pub struct ConfigPaths {
     pub opencode: String,
     pub pi_agent: String,
     pub oh_my_pi: String,
+    pub deepseek_harness: String,
 }
 
 impl Default for ConfigPaths {
@@ -33,6 +36,7 @@ impl Default for ConfigPaths {
             opencode: backends::backend(ConfigFormat::Opencode).default_local_path(),
             pi_agent: backends::backend(ConfigFormat::PiAgent).default_local_path(),
             oh_my_pi: backends::backend(ConfigFormat::OhMyPi).default_local_path(),
+            deepseek_harness: backends::backend(ConfigFormat::DeepSeekHarness).default_local_path(),
         }
     }
 }
@@ -44,6 +48,7 @@ impl ConfigPaths {
             ConfigFormat::Opencode => self.opencode.clone(),
             ConfigFormat::PiAgent => self.pi_agent.clone(),
             ConfigFormat::OhMyPi => self.oh_my_pi.clone(),
+            ConfigFormat::DeepSeekHarness => self.deepseek_harness.clone(),
         }
     }
 

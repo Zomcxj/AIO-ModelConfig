@@ -243,6 +243,8 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         npm,
         base_url,
         api_key: str_at(v, "apiKey").to_string(),
+        api_key_env: String::new(),
+        api_key_secret: String::new(),
         timeout: String::new(),
         compat,
         models,

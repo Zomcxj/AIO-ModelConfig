@@ -266,6 +266,7 @@ impl Backend for OhMyPiBackend {
             agents: Vec::new(),
             providers,
             extras,
+            default_model: None,
         })
     }
 

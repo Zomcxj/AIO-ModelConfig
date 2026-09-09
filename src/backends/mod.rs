@@ -12,6 +12,7 @@
 pub mod opencode;
 pub mod pi_agent;
 pub mod oh_my_pi;
+pub mod deepseek_harness;
 
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
@@ -31,8 +32,10 @@ pub struct BackendLoad {
     /// providers（两种格式都有）。
     pub providers: Vec<ProviderRow>,
     /// 本后端顶层未知字段：opencode 为整个 root（agent/provider 会被整体替换），
-    /// pi 系为 `providers` 之外的顶层字段。
+    /// pi 系为 `providers` 之外的顶层字段；DSH 为完整 root。
     pub extras: Value,
+    /// DSH 的默认模型引用；其他后端为 None。
+    pub default_model: Option<(String, String)>,
 }
 
 /// 配置后端：一种 agent 配置格式的加载 / 保存 / 判别 / 路径知识。
@@ -59,6 +62,11 @@ pub trait Backend: Sync {
     /// 内容 → 结构化数据；读取/解析失败返回 Err。
     fn parse(&self, content: &str) -> Result<BackendLoad, String>;
 
+    /// 带源路径解析。默认与 `parse` 相同；需要同级 sidecar 文件的后端覆写。
+    fn parse_at(&self, content: &str, _path: &str) -> Result<BackendLoad, String> {
+        self.parse(content)
+    }
+
     /// 构造保存用 root。
     /// - `target_root = None`：当前文件保存，以 `extras` 为基底整体写入 UI 状态；
     /// - `target_root = Some`：跨格式目标保存，与目标现有内容合并（upsert）。
@@ -70,8 +78,46 @@ pub trait Backend: Sync {
         target_root: Option<&Value>,
     ) -> Value;
 
+    /// 构造保存 root，并可更新 DSH 等后端的专用默认模型字段。
+    fn serialize_root_with_default(
+        &self,
+        agents: &[AgentRow],
+        providers: &[ProviderRow],
+        extras: &Value,
+        target_root: Option<&Value>,
+        default_model: Option<&Option<(String, String)>>,
+    ) -> Value {
+        let mut root = self.serialize_root(agents, providers, extras, target_root);
+        if let Some(default_model) = default_model {
+            if let Some(object) = root.as_object_mut() {
+                match default_model {
+                    Some((provider, model)) => {
+                        object.insert(
+                            "agent-default-model".into(),
+                            serde_json::json!({ "provider": provider, "model": model }),
+                        );
+                    }
+                    None => {
+                        object.remove("agent-default-model");
+                    }
+                }
+            }
+        }
+        root
+    }
+
     /// 跨格式目标保存时读取目标现有 root（容错：读不到返回空对象）。
     fn load_target_root(&self, path: &str) -> Value;
+
+    /// 保存与主配置同级的 sidecar 文件（默认无 sidecar）。
+    /// 主配置写入前调用，sidecar 失败会取消本次保存。
+    fn save_sidecars(
+        &self,
+        _path: &str,
+        _providers: &[ProviderRow],
+    ) -> Result<(), String> {
+        Ok(())
+    }
 
     /// 官方图标：32×32 未预乘 RGBA 原始字节与尺寸；None = 无图标。
     fn icon_rgba(&self) -> Option<(&'static [u8], u32, u32)> {
@@ -84,8 +130,12 @@ pub trait Backend: Sync {
 
 /// 全部后端。**顺序即语义**：第 0 个是判别回落项，其余按“更具体优先”排列
 /// （omp 在 pi 之前：.yml 扩展名优先归 omp，无扩展名时 JSON 语法内容让位给 pi）。
-pub static BACKENDS: &[&dyn Backend] =
-    &[&opencode::BACKEND, &oh_my_pi::BACKEND, &pi_agent::BACKEND];
+pub static BACKENDS: &[&dyn Backend] = &[
+    &opencode::BACKEND,
+    &deepseek_harness::BACKEND,
+    &oh_my_pi::BACKEND,
+    &pi_agent::BACKEND,
+];
 
 /// 按标识查找后端。
 pub fn backend(id: ConfigFormat) -> &'static dyn Backend {
@@ -109,7 +159,7 @@ pub fn detect_format(content: &str, path: &str) -> ConfigFormat {
 /// 通用加载：读文件（本地或 WSL）+ 按后端解析。
 pub fn load_backend(id: ConfigFormat, path: &str) -> Result<BackendLoad, String> {
     let content = crate::util::read_config_content(path)?;
-    backend(id).parse(&content)
+    backend(id).parse_at(&content, path)
 }
 
 /// WSL 目标路径（存在则返回）。

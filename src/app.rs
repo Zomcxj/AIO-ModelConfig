@@ -1,10 +1,11 @@
 use crate::backends;
 use crate::convert;
+use crate::credentials;
 use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
 use crate::ui::{card_frame, card_list, move_item, numeric_text_edit, DragHandle};
-use crate::util::{is_wsl_path, parse_number_text, show_file_dialog};
+use crate::util::{self, is_wsl_path, parse_number_text, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -76,6 +77,9 @@ pub struct App {
     show_providers_section: bool,
     load_error: Option<String>,
     pi_extras: Value,
+    /// DSH settings.yaml 中的 agent-default-model。
+    dsh_default_model: Option<(String, String)>,
+    dsh_default_model_dirty: bool,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
     backend_icons: Vec<Option<egui::TextureHandle>>,
 }
@@ -116,6 +120,8 @@ impl Default for App {
             show_providers_section: true,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
+            dsh_default_model: None,
+            dsh_default_model_dirty: false,
             backend_icons: Vec::new(),
         };
         app.apply_load();
@@ -166,6 +172,10 @@ impl eframe::App for App {
                         ui.add_space(8.0);
                     }
                     self.ui_providers_section(ui);
+                    if self.current_page == ConfigFormat::DeepSeekHarness {
+                        ui.add_space(8.0);
+                        self.ui_dsh_default_model(ui);
+                    }
                     ui.add_space(8.0);
                 });
         });
@@ -208,7 +218,8 @@ impl App {
                 self.agents = load.agents;
                 self.providers = load.providers;
                 self.pi_extras = load.extras;
-                self.load_error = None;
+                self.dsh_default_model = load.default_model;
+                self.dsh_default_model_dirty = false;
                 self.status = format!(
                     "已加载 ({}): {} agents, {} providers",
                     self.source_format.label(),
@@ -221,7 +232,8 @@ impl App {
                 self.agents = Vec::new();
                 self.providers = Vec::new();
                 self.pi_extras = Value::Object(Map::new());
-                self.load_error = Some(e.clone());
+                self.dsh_default_model = None;
+                self.dsh_default_model_dirty = false;
                 self.status = format!("加载失败: {}", e);
             }
         }
@@ -766,6 +778,51 @@ impl App {
         });
     }
 
+    fn ui_dsh_default_model(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.strong("agent-default-model");
+            let (mut provider, mut model) = self
+                .dsh_default_model
+                .clone()
+                .unwrap_or_default();
+            let provider_changed = ui
+                .horizontal(|ui| {
+                    ui.label("provider");
+                    ui.text_edit_singleline(&mut provider)
+                })
+                .inner
+                .changed();
+            let model_changed = ui
+                .horizontal(|ui| {
+                    ui.label("model");
+                    ui.text_edit_singleline(&mut model)
+                })
+                .inner
+                .changed();
+            if provider_changed || model_changed {
+                self.dsh_default_model_dirty = true;
+                self.dsh_default_model = if provider.trim().is_empty() && model.trim().is_empty() {
+                    None
+                } else {
+                    Some((provider, model))
+                };
+            }
+            if self.dsh_default_model.is_none() {
+                ui.label(egui::RichText::new("留空表示保留/删除默认模型配置").weak());
+            }
+        });
+    }
+
+    /// 当前页面的思考档位标签。
+    fn dialect_variants(&self) -> (&'static str, &'static [&'static str]) {
+        match self.current_page {
+            ConfigFormat::Opencode => ("variants", &["none", "low", "medium", "high", "xhigh", "max", "ultra"]),
+            ConfigFormat::PiAgent => ("thinkingLevelMap", &["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+            ConfigFormat::OhMyPi => ("thinking.efforts", &["minimal", "low", "medium", "high", "xhigh", "max"]),
+            ConfigFormat::DeepSeekHarness => ("reasoningEfforts", &["minimal", "low", "medium", "high", "xhigh", "max"]),
+        }
+    }
+
     fn ui_providers_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Providers");
@@ -916,26 +973,29 @@ impl App {
             .filter(|(i, _)| *i != idx)
             .map(|(_, p)| p.key.trim().to_string())
             .collect();
+        let (variants_label, variant_names) = self.dialect_variants();
         let p = &mut self.providers[idx];
         let show_oc = self.current_page == ConfigFormat::Opencode;
         let show_omp = self.current_page == ConfigFormat::OhMyPi;
-        let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
-        let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
+        let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
+        let base_label = if show_oc {
+            "options.baseURL"
+        } else if show_dsh {
+            "baseURL"
+        } else {
+            "baseUrl"
+        };
+        let api_key_label = if show_oc {
+            "options.apiKey"
+        } else if show_dsh {
+            "apiKeyEnv"
+        } else {
+            "apiKey"
+        };
         let timeout_label = "options.timeout";
         let context_label = if show_oc { "limit.context" } else { "contextWindow" };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
-        // 思考档位：三方言各不相同
-        let variants_label = match self.current_page {
-            ConfigFormat::Opencode => "variants",
-            ConfigFormat::PiAgent => "thinkingLevelMap",
-            ConfigFormat::OhMyPi => "thinking.efforts",
-        };
-        let variant_names: &[&str] = match self.current_page {
-            ConfigFormat::Opencode => &["none", "low", "medium", "high", "xhigh", "max", "ultra"],
-            ConfigFormat::PiAgent => &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-            ConfigFormat::OhMyPi => &["minimal", "low", "medium", "high", "xhigh", "max"],
-        };
         ui.horizontal(|ui| {
             ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
             let key_resp = ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
@@ -1045,7 +1105,13 @@ impl App {
                 [60.0, 24.0],
                 egui::Label::new(egui::RichText::new(api_key_label).weak()),
             );
-            ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
+            if show_dsh {
+                ui.add(egui::TextEdit::singleline(&mut p.api_key_env).desired_width(240.0));
+                ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("API Key").weak()));
+                ui.add(egui::TextEdit::singleline(&mut p.api_key_secret).desired_width(240.0));
+            } else {
+                ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
+            }
             if show_oc {
                 ui.add_sized(
                     [60.0, 24.0],
@@ -1090,7 +1156,9 @@ impl App {
                     egui::Label::new(egui::RichText::new("name:").weak()),
                 );
                 ui.add(egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0));
-                ui.checkbox(&mut p.models[j].reasoning, "reasoning");
+                if !show_dsh {
+                    ui.checkbox(&mut p.models[j].reasoning, "reasoning");
+                }
                 if show_oc {
                     ui.checkbox(&mut p.models[j].tool_call, "tool_call");
                     ui.checkbox(&mut p.models[j].store, "store");
@@ -1297,23 +1365,26 @@ impl App {
     fn ui_new_provider_form(&mut self, ui: &mut egui::Ui) {
         let show_oc = self.current_page == ConfigFormat::Opencode;
         let show_omp = self.current_page == ConfigFormat::OhMyPi;
-        let base_label = if show_oc { "options.baseURL" } else { "baseUrl" };
-        let api_key_label = if show_oc { "options.apiKey" } else { "apiKey" };
+        let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
+        let base_label = if show_oc {
+            "options.baseURL"
+        } else if show_dsh {
+            "baseURL"
+        } else {
+            "baseUrl"
+        };
+        let api_key_label = if show_oc {
+            "options.apiKey"
+        } else if show_dsh {
+            "apiKeyEnv"
+        } else {
+            "apiKey"
+        };
         let timeout_label = "options.timeout";
         let context_label = if show_oc { "limit.context" } else { "contextWindow" };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
-        // 思考档位：三方言各不相同
-        let variants_label = match self.current_page {
-            ConfigFormat::Opencode => "variants",
-            ConfigFormat::PiAgent => "thinkingLevelMap",
-            ConfigFormat::OhMyPi => "thinking.efforts",
-        };
-        let variant_names: &[&str] = match self.current_page {
-            ConfigFormat::Opencode => &["none", "low", "medium", "high", "xhigh", "max", "ultra"],
-            ConfigFormat::PiAgent => &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-            ConfigFormat::OhMyPi => &["minimal", "low", "medium", "high", "xhigh", "max"],
-        };
+        let (variants_label, variant_names) = self.dialect_variants();
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("key").weak()));
@@ -1425,11 +1496,25 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(api_key_label).weak()),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_provider.api_key)
-                        .hint_text("sk-xxx")
-                        .desired_width(408.0),
-                );
+                if show_dsh {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.api_key_env)
+                            .hint_text("DEEPSEEK_API_KEY")
+                            .desired_width(240.0),
+                    );
+                    ui.add_sized([60.0, 24.0], egui::Label::new(egui::RichText::new("API Key").weak()));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.api_key_secret)
+                            .hint_text("实际密钥")
+                            .desired_width(240.0),
+                    );
+                } else {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_provider.api_key)
+                            .hint_text("sk-xxx")
+                            .desired_width(408.0),
+                    );
+                }
                 if show_oc {
                     ui.add_sized(
                         [60.0, 24.0],
@@ -1457,7 +1542,9 @@ impl App {
                         egui::Label::new(egui::RichText::new("name:").weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.models[j].name).desired_width(120.0));
-                    ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
+                    if !show_dsh {
+                        ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
+                    }
                     if show_oc {
                         ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
                         ui.checkbox(&mut self.new_provider.models[j].store, "store");
@@ -1499,7 +1586,9 @@ impl App {
                         egui::Label::new(egui::RichText::new("name:").weak()),
                     );
                     ui.add(egui::TextEdit::singleline(&mut self.new_provider.new_model.name).desired_width(120.0));
-                    ui.checkbox(&mut self.new_provider.new_model.reasoning, "reasoning");
+                    if !show_dsh {
+                        ui.checkbox(&mut self.new_provider.new_model.reasoning, "reasoning");
+                    }
                     if show_oc {
                         ui.checkbox(&mut self.new_provider.new_model.tool_call, "tool_call");
                         ui.checkbox(&mut self.new_provider.new_model.store, "store");
@@ -1881,17 +1970,68 @@ impl App {
         } else {
             Some(backend.load_target_root(path))
         };
-        let root = backend.serialize_root(
+        if fmt == ConfigFormat::DeepSeekHarness {
+            if let Some((provider, model)) = &self.dsh_default_model {
+                let valid = self.providers.iter().any(|p| {
+                    p.key.trim() == provider.trim()
+                        && p.models.iter().any(|m| m.id.trim() == model.trim())
+                });
+                if !valid {
+                    return Err(format!(
+                        "agent-default-model 引用了不存在的 provider/model: {}/{}",
+                        provider, model
+                    ));
+                }
+            }
+        }
+        let root = backend.serialize_root_with_default(
             &self.agents,
             &self.providers,
             self.extras_for(fmt),
             target_root.as_ref(),
+            if fmt == ConfigFormat::DeepSeekHarness && self.dsh_default_model_dirty {
+                Some(&self.dsh_default_model)
+            } else {
+                None
+            },
         );
         let content = backend.render(&root, self.save_format == SaveFormat::Compact)?;
-        backends::write_config(path, &content)?;
+        let dsh_sidecar_backup = if fmt == ConfigFormat::DeepSeekHarness {
+            let sidecar = credentials::sidecar_path(path);
+            if util::config_exists(&sidecar) {
+                Some((sidecar.clone(), util::read_config_content(&sidecar)?))
+            } else {
+                Some((sidecar, String::new()))
+            }
+        } else {
+            None
+        };
+        if fmt == ConfigFormat::DeepSeekHarness {
+            backend.save_sidecars(path, &self.providers)?;
+        }
+        if let Err(error) = backends::write_config(path, &content) {
+            if let Some((sidecar, old_content)) = dsh_sidecar_backup {
+                let restore = if old_content.is_empty() {
+                    if util::config_exists(&sidecar) {
+                        util::remove_config(&sidecar)
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    backends::write_config(&sidecar, &old_content)
+                };
+                if let Err(restore_error) = restore {
+                    return Err(format!("{}；凭据回滚失败: {}", error, restore_error));
+                }
+            }
+            return Err(error);
+        }
         // 当前文件保存成功后，回填 opencode 的 extras 载体（self.root）保持与磁盘一致
         if is_current && fmt == ConfigFormat::Opencode {
             self.root = root;
+        }
+        if is_current && fmt == ConfigFormat::DeepSeekHarness {
+            self.dsh_default_model_dirty = false;
         }
         Ok(())
     }
@@ -1902,6 +2042,7 @@ impl App {
             ConfigFormat::Opencode => &self.root,
             // pi 系（pi-agent / oh-my-pi）共用 extras 载体：providers 之外的顶层字段
             ConfigFormat::PiAgent | ConfigFormat::OhMyPi => &self.pi_extras,
+            ConfigFormat::DeepSeekHarness => &self.root,
         }
     }
 
