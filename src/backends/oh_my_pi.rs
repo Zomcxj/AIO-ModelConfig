@@ -297,6 +297,14 @@ impl Backend for OhMyPiBackend {
         }
     }
 
+    fn icon_rgba(&self) -> Option<(&'static [u8], u32, u32)> {
+        Some((
+            include_bytes!("../../assets/agents/oh-my-pi_32.bin"),
+            32,
+            32,
+        ))
+    }
+
     fn render(&self, root: &Value, _compact: bool) -> Result<String, String> {
         to_yaml_string(root)
     }

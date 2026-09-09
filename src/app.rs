@@ -62,6 +62,8 @@ pub struct App {
     show_providers_section: bool,
     load_error: Option<String>,
     pi_extras: Value,
+    /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
+    backend_icons: Vec<Option<egui::TextureHandle>>,
 }
 
 impl Default for App {
@@ -98,6 +100,7 @@ impl Default for App {
             show_providers_section: true,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
+            backend_icons: Vec::new(),
         };
         app.apply_load();
         app
@@ -115,6 +118,22 @@ impl eframe::App for App {
         if let Some(path) = dropped {
             self.config_path = path;
             self.reload();
+        }
+        // 首帧惰性加载各后端官方图标
+        if self.backend_icons.is_empty() {
+            self.backend_icons = backends::BACKENDS
+                .iter()
+                .map(|b| {
+                    b.icon_rgba().map(|(rgba, w, h)| {
+                        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba);
+                        ctx.load_texture(
+                            format!("backend_icon_{}", b.id().label()),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        )
+                    })
+                })
+                .collect();
         }
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
@@ -228,7 +247,14 @@ impl App {
                 ui.label("保存位置:");
                 ui.checkbox(&mut self.save_current, "当前文件")
                     .on_hover_text(format!("写入: {}", self.config_path));
-                for t in &mut self.targets {
+                let icons: Vec<Option<egui::TextureHandle>> = self.backend_icons.clone();
+                for (t, icon) in self.targets.iter_mut().zip(icons.iter()) {
+                    if let Some(tex) = icon {
+                        ui.add(
+                            egui::Image::from_texture(tex)
+                                .fit_to_exact_size(egui::vec2(14.0, 14.0)),
+                        );
+                    }
                     let label = t.backend.label();
                     let tip = format!("写入: {}", t.path);
                     ui.add_enabled(t.available, egui::Checkbox::new(&mut t.enabled, label))
@@ -264,6 +290,12 @@ impl App {
                     self.filter.clear();
                 }
                 ui.separator();
+                if let Some(icon) = self.icon_for(self.source_format) {
+                    ui.add(
+                        egui::Image::from_texture(icon)
+                            .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                    );
+                }
                 ui.label(
                     egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
                 );
@@ -1607,6 +1639,12 @@ impl App {
             // pi 系（pi-agent / oh-my-pi）共用 extras 载体：providers 之外的顶层字段
             ConfigFormat::PiAgent | ConfigFormat::OhMyPi => &self.pi_extras,
         }
+    }
+
+    /// 按格式取官方图标纹理（图标未加载时返回 None）。
+    fn icon_for(&self, fmt: ConfigFormat) -> Option<&egui::TextureHandle> {
+        let idx = backends::BACKENDS.iter().position(|b| b.id() == fmt)?;
+        self.backend_icons.get(idx).and_then(|o| o.as_ref())
     }
 }
 

@@ -97,6 +97,14 @@ impl Backend for PiAgentBackend {
         }
     }
 
+    fn icon_rgba(&self) -> Option<(&'static [u8], u32, u32)> {
+        Some((
+            include_bytes!("../../assets/agents/pi-agent_32.bin"),
+            32,
+            32,
+        ))
+    }
+
     fn render(&self, root: &Value, compact: bool) -> Result<String, String> {
         Ok(if compact {
             crate::app::compact_json(root)

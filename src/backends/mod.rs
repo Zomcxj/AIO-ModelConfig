@@ -73,6 +73,11 @@ pub trait Backend: Sync {
     /// 跨格式目标保存时读取目标现有 root（容错：读不到返回空对象）。
     fn load_target_root(&self, path: &str) -> Value;
 
+    /// 官方图标：32×32 未预乘 RGBA 原始字节与尺寸；None = 无图标。
+    fn icon_rgba(&self) -> Option<(&'static [u8], u32, u32)> {
+        None
+    }
+
     /// root → 文件内容（opencode/pi 为 JSON 两种风格，omp 为 YAML；compact 对 YAML 无意义）。
     fn render(&self, root: &Value, compact: bool) -> Result<String, String>;
 }
