@@ -1,0 +1,99 @@
+//! pi-agent 后端：`~/.pi/agent/models.json`（JSONC）。
+//!
+//! 结构：顶层 `providers`（map）+ 其他顶层字段（extras）原样保留。
+
+use super::{Backend, BackendLoad};
+use crate::convert;
+use crate::format::ConfigFormat;
+use crate::model::{AgentRow, ProviderRow};
+use crate::util::{parse_config_content, read_config_content, wsl_home, wsl_path_exists};
+use serde_json::{Map, Value};
+use std::path::Path;
+
+pub struct PiAgentBackend;
+
+pub static BACKEND: PiAgentBackend = PiAgentBackend;
+
+fn default_local_path() -> String {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    format!("{}\\.pi\\agent\\models.json", home)
+}
+
+impl Backend for PiAgentBackend {
+    fn id(&self) -> ConfigFormat {
+        ConfigFormat::PiAgent
+    }
+
+    fn file_ext(&self) -> &'static str {
+        "json"
+    }
+
+    fn default_local_path(&self) -> String {
+        default_local_path()
+    }
+
+    fn default_wsl_path(&self) -> Option<String> {
+        Some(format!("{}/.pi/agent/models.json", wsl_home()?))
+    }
+
+    fn local_available(&self, local_path: &str) -> bool {
+        // 宽松判定：文件或父目录存在即可（父目录存在 = 可新建）
+        Path::new(local_path).exists()
+            || Path::new(local_path)
+                .parent()
+                .map(|p| p.exists())
+                .unwrap_or(false)
+    }
+
+    fn wsl_available(&self, wsl_path: &str) -> bool {
+        wsl_path_exists(wsl_path)
+    }
+
+    fn detect(&self, content: &str, _path: &str) -> bool {
+        // pi 判定：含 providers 对象且无 provider 键
+        parse_config_content(content)
+            .map(|v| {
+                v.get("providers").and_then(|x| x.as_object()).is_some()
+                    && v.get("provider").is_none()
+            })
+            .unwrap_or(false)
+    }
+
+    fn parse(&self, content: &str) -> Result<BackendLoad, String> {
+        let v = parse_config_content(content)?;
+        let providers = convert::load_pi_providers(&v);
+        let extras = convert::load_pi_extras(&v);
+        Ok(BackendLoad {
+            root: v,
+            agents: Vec::new(),
+            providers,
+            extras,
+        })
+    }
+
+    fn serialize_root(
+        &self,
+        _agents: &[AgentRow],
+        providers: &[ProviderRow],
+        extras: &Value,
+        target_root: Option<&Value>,
+    ) -> Value {
+        // 跨格式目标：extras 取目标文件自身的顶层字段，仅重写 providers
+        let base = match target_root {
+            Some(target) => target,
+            None => extras,
+        };
+        convert::to_pi_root(providers, base)
+    }
+
+    fn load_target_root(&self, path: &str) -> Value {
+        match read_config_content(path) {
+            Ok(content) => parse_config_content(&content)
+                .map(|v| convert::load_pi_extras(&v))
+                .unwrap_or(Value::Object(Map::new())),
+            Err(_) => Value::Object(Map::new()),
+        }
+    }
+}

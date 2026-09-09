@@ -299,3 +299,29 @@ fn remove_trailing_commas(input: &str) -> String {
     }
     out
 }
+
+/// 读取配置文件内容（支持本地与 WSL 路径）；不存在返回空串。
+pub fn read_config_content(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Ok(String::new());
+    }
+    if is_wsl_path(path) {
+        if !wsl_file_exists(path) {
+            return Ok(String::new());
+        }
+        read_wsl_file(path)
+    } else if std::path::Path::new(path).exists() {
+        std::fs::read_to_string(path).map_err(|e| format!("读取失败: {}", e))
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// 解析配置内容（支持 JSONC 注释与尾逗号）；空内容视为空对象。
+pub fn parse_config_content(content: &str) -> Result<serde_json::Value, String> {
+    if content.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let stripped = strip_jsonc_comments(content);
+    serde_json::from_str(&stripped).map_err(|e| format!("解析失败: {}", e))
+}

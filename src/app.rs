@@ -1,13 +1,13 @@
+use crate::backends;
 use crate::convert;
 use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
 use crate::ui::{card_frame, card_grid, DragHandle, move_item};
-use crate::util::{ensure_parent_dir, is_wsl_path, read_wsl_file, show_file_dialog};
+use crate::util::show_file_dialog;
 use eframe::egui;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
-use std::fs;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum SaveFormat {
@@ -23,6 +23,14 @@ impl SaveFormat {
             Self::Compact => "压缩格式",
         }
     }
+}
+
+/// 一个保存目标的运行时状态（可用性 / 解析路径 / 勾选）。
+struct SaveTarget {
+    backend: ConfigFormat,
+    available: bool,
+    path: String,
+    enabled: bool,
 }
 
 pub struct App {
@@ -48,16 +56,11 @@ pub struct App {
     source_format: ConfigFormat,
     config_paths: ConfigPaths,
     save_current: bool,
-    save_opencode: bool,
-    save_pi_agent: bool,
+    targets: Vec<SaveTarget>,
     provider_view_opencode: bool,
     show_agents_section: bool,
     show_providers_section: bool,
     load_error: Option<String>,
-    oc_available: bool,
-    pi_available: bool,
-    target_opencode: String,
-    target_pi_agent: String,
     pi_extras: Value,
 }
 
@@ -89,16 +92,11 @@ impl Default for App {
             source_format: format,
             config_paths: paths,
             save_current: true,
-            save_opencode: false,
-            save_pi_agent: false,
+            targets: Vec::new(),
             provider_view_opencode: format == ConfigFormat::Opencode,
             show_agents_section: true,
             show_providers_section: true,
             load_error: None,
-            oc_available: false,
-            pi_available: false,
-            target_opencode: String::new(),
-            target_pi_agent: String::new(),
             pi_extras: Value::Object(Map::new()),
         };
         app.apply_load();
@@ -143,27 +141,30 @@ impl eframe::App for App {
 impl App {
     /// 解析各保存目标的可用性与实际路径（避免在渲染循环中频繁拉起 wsl 进程）。
     fn refresh_targets(&mut self) {
-        self.oc_available = self.config_paths.validate_target(ConfigFormat::Opencode);
-        self.pi_available = self.config_paths.validate_target(ConfigFormat::PiAgent);
-        self.target_opencode = self.config_paths.target_path(ConfigFormat::Opencode);
-        self.target_pi_agent = self.config_paths.target_path(ConfigFormat::PiAgent);
+        self.targets = backends::BACKENDS
+            .iter()
+            .map(|b| {
+                let id = b.id();
+                SaveTarget {
+                    backend: id,
+                    available: self.config_paths.validate_target(id),
+                    path: self.config_paths.target_path(id),
+                    enabled: false,
+                }
+            })
+            .collect();
     }
 
     /// 按 source_format 加载当前 config_path；失败时置空数据并记录 load_error。
     fn apply_load(&mut self) {
         let path = self.config_path.clone();
-        let result = match self.source_format {
-            ConfigFormat::Opencode => load_opencode_result(&path)
-                .map(|(r, a, pv)| (r, a, pv, Value::Object(Map::new()))),
-            ConfigFormat::PiAgent => load_pi_agent_result(&path)
-                .map(|(r, pv, extras)| (r, Vec::new(), pv, extras)),
-        };
+        let result = backends::load_backend(self.source_format, &path);
         match result {
-            Ok((r, a, pv, extras)) => {
-                self.root = r;
-                self.agents = a;
-                self.providers = pv;
-                self.pi_extras = extras;
+            Ok(load) => {
+                self.root = load.root;
+                self.agents = load.agents;
+                self.providers = load.providers;
+                self.pi_extras = load.extras;
                 self.load_error = None;
                 self.status = format!(
                     "已加载 ({}): {} agents, {} providers",
@@ -184,8 +185,6 @@ impl App {
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
         self.save_current = true;
-        self.save_opencode = false;
-        self.save_pi_agent = false;
         self.refresh_targets();
     }
 
@@ -229,16 +228,12 @@ impl App {
                 ui.label("保存位置:");
                 ui.checkbox(&mut self.save_current, "当前文件")
                     .on_hover_text(format!("写入: {}", self.config_path));
-                ui.add_enabled(
-                    self.oc_available,
-                    egui::Checkbox::new(&mut self.save_opencode, "opencode"),
-                )
-                .on_hover_text(format!("写入: {}", self.target_opencode));
-                ui.add_enabled(
-                    self.pi_available,
-                    egui::Checkbox::new(&mut self.save_pi_agent, "pi-agent"),
-                )
-                .on_hover_text(format!("写入: {}", self.target_pi_agent));
+                for t in &mut self.targets {
+                    let label = t.backend.label();
+                    let tip = format!("写入: {}", t.path);
+                    ui.add_enabled(t.available, egui::Checkbox::new(&mut t.enabled, label))
+                        .on_hover_text(tip);
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("主题:");
@@ -1524,7 +1519,7 @@ impl App {
     }
 
     fn save(&mut self) {
-        if !self.save_current && !self.save_opencode && !self.save_pi_agent {
+        if !self.save_current && !self.targets.iter().any(|t| t.enabled) {
             self.status = "请先选择保存目标".into();
             return;
         }
@@ -1539,113 +1534,70 @@ impl App {
             } else if let Some(err) = self.load_error.clone() {
                 status_parts.push(format!("当前文件: 加载失败({})，已跳过", err));
             } else {
-                let res = match self.source_format {
-                    ConfigFormat::Opencode => self.save_opencode_to(&self.config_path.clone()),
-                    ConfigFormat::PiAgent => self.save_pi_agent_to(&self.config_path.clone()),
-                };
+                let fmt = self.source_format;
+                let path = self.config_path.clone();
+                let res = self.save_backend_to(fmt, &path);
                 status_parts.push(match res {
                     Ok(()) => "当前文件: 已保存".to_string(),
                     Err(e) => format!("当前文件: 保存失败({})", e),
                 });
             }
         }
-        if self.save_opencode {
-            if !self.oc_available {
-                status_parts
-                    .push("opencode: 未安装（本地与 WSL 均未找到配置）".to_string());
-            } else {
-                let path = self.target_opencode.clone();
-                let res = self.save_opencode_to(&path);
-                status_parts.push(match res {
-                    Ok(()) => "opencode: 已保存".to_string(),
-                    Err(e) => format!("opencode: 保存失败({})", e),
-                });
+        let snapshot: Vec<(ConfigFormat, String, bool, bool)> = self
+            .targets
+            .iter()
+            .map(|t| (t.backend, t.path.clone(), t.available, t.enabled))
+            .collect();
+        for (fmt, path, available, enabled) in snapshot {
+            if !enabled {
+                continue;
             }
-        }
-        if self.save_pi_agent {
-            if !self.pi_available {
+            if !available {
                 status_parts
-                    .push("pi-agent: 未安装（本地与 WSL 均未找到配置）".to_string());
-            } else {
-                let path = self.target_pi_agent.clone();
-                let res = self.save_pi_agent_to(&path);
-                status_parts.push(match res {
-                    Ok(()) => "pi-agent: 已保存".to_string(),
-                    Err(e) => format!("pi-agent: 保存失败({})", e),
-                });
+                    .push(format!("{}: 未安装（本地与 WSL 均未找到配置）", fmt.label()));
+                continue;
             }
+            let res = self.save_backend_to(fmt, &path);
+            status_parts.push(match res {
+                Ok(()) => format!("{}: 已保存", fmt.label()),
+                Err(e) => format!("{}: 保存失败({})", fmt.label(), e),
+            });
         }
         self.status = status_parts.join("; ");
     }
 
-    fn save_opencode_to(&mut self, path: &str) -> Result<(), String> {
+    /// 通用保存：按后端构造 root、渲染内容并写入。
+    fn save_backend_to(&mut self, fmt: ConfigFormat, path: &str) -> Result<(), String> {
+        let backend = backends::backend(fmt);
         let is_current = path == self.config_path;
-        let root = if is_current {
-            // 当前文件：以 UI 状态为准整体替换 agent / provider（删除即生效）
-            let mut r = std::mem::take(&mut self.root);
-            if let Value::Object(o) = &mut r {
-                let mut am = Map::new();
-                for a in &self.agents {
-                    if !a.key.is_empty() {
-                        am.insert(a.key.clone(), a.to_value());
-                    }
-                }
-                o.insert("agent".into(), Value::Object(am));
-
-                let mut pm = Map::new();
-                for p in &self.providers {
-                    if !p.key.is_empty() {
-                        pm.insert(p.key.clone(), p.to_value());
-                    }
-                }
-                o.insert("provider".into(), Value::Object(pm));
-            }
-            r
+        let target_root: Option<Value> = if is_current {
+            None
         } else {
-            // 跨格式目标：加载目标现有内容，upsert 合并而非整体覆盖
-            merge_opencode_root(&load_or_empty(path).0, &self.agents, &self.providers)
+            Some(backend.load_target_root(path))
         };
-
+        let root = backend.serialize_root(
+            &self.agents,
+            &self.providers,
+            self.extras_for(fmt),
+            target_root.as_ref(),
+        );
         let content = match self.save_format {
             SaveFormat::Current => pretty_json(&root),
             SaveFormat::Compact => compact_json(&root),
         };
-
-        let write_res = if is_wsl_path(path) {
-            crate::util::write_wsl_file(path, &content)
-        } else {
-            match ensure_parent_dir(path) {
-                Err(e) => Err(e),
-                Ok(()) => fs::write(path, content).map_err(|e| e.to_string()),
-            }
-        };
-        if is_current {
+        backends::write_config(path, &content)?;
+        // 当前文件保存成功后，回填 opencode 的 extras 载体（self.root）保持与磁盘一致
+        if is_current && fmt == ConfigFormat::Opencode {
             self.root = root;
         }
-        write_res
+        Ok(())
     }
 
-    fn save_pi_agent_to(&mut self, path: &str) -> Result<(), String> {
-        let is_current = path == self.config_path;
-        // 跨格式目标：extras 取目标文件自身的顶层字段，仅重写 providers
-        let root = if is_current {
-            convert::to_pi_root(&self.providers, &self.pi_extras)
-        } else {
-            let (_, _, target_extras) = load_pi_agent_result(path)
-                .unwrap_or((Value::Object(Map::new()), Vec::new(), Value::Object(Map::new())));
-            convert::to_pi_root(&self.providers, &target_extras)
-        };
-
-        let content = match self.save_format {
-            SaveFormat::Current => pretty_json(&root),
-            SaveFormat::Compact => compact_json(&root),
-        };
-
-        if is_wsl_path(path) {
-            crate::util::write_wsl_file(path, &content)
-        } else {
-            ensure_parent_dir(path)?;
-            fs::write(path, content).map_err(|e| e.to_string())
+    /// 当前文件保存时使用的基底 extras（按后端取对应载体）。
+    fn extras_for(&self, fmt: ConfigFormat) -> &Value {
+        match fmt {
+            ConfigFormat::Opencode => &self.root,
+            ConfigFormat::PiAgent => &self.pi_extras,
         }
     }
 }
@@ -1877,48 +1829,16 @@ fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole
 // ---------- 配置加载 ----------
 
 /// 读取配置文件内容；本地与 WSL 路径统一处理，文件不存在视为新建场景返回空串。
-pub fn read_config_content(path: &str) -> Result<String, String> {
-    if path.is_empty() {
-        return Ok(String::new());
-    }
-    if is_wsl_path(path) {
-        if !crate::util::wsl_file_exists(path) {
-            return Ok(String::new());
-        }
-        read_wsl_file(path)
-    } else if std::path::Path::new(path).exists() {
-        fs::read_to_string(path).map_err(|e| format!("读取失败: {}", e))
-    } else {
-        Ok(String::new())
-    }
-}
-
-/// 解析配置内容（支持 JSONC 注释与尾逗号）；空内容视为空对象。
-pub fn parse_config_content(content: &str) -> Result<Value, String> {
-    if content.trim().is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    let stripped = crate::util::strip_jsonc_comments(content);
-    serde_json::from_str(&stripped).map_err(|e| format!("解析失败: {}", e))
-}
+// —— 兼容再导出：实现迁移至 util / backends，保持既有测试路径可用 ——
+pub use crate::backends::opencode::merge_opencode_root;
+pub use crate::util::{parse_config_content, read_config_content};
 
 /// 加载 opencode 配置；读取/解析失败返回 Err。
 pub fn load_opencode_result(
     path: &str,
 ) -> Result<(Value, Vec<AgentRow>, Vec<ProviderRow>), String> {
-    let content = read_config_content(path)?;
-    let v = parse_config_content(&content)?;
-    let agents = v
-        .get("agent")
-        .and_then(|x| x.as_object())
-        .map(|o| o.iter().map(|(k, av)| AgentRow::from(k, av)).collect())
-        .unwrap_or_default();
-    let providers = v
-        .get("provider")
-        .and_then(|x| x.as_object())
-        .map(|o| o.iter().map(|(k, pv)| ProviderRow::from(k, pv)).collect())
-        .unwrap_or_default();
-    Ok((v, agents, providers))
+    let load = crate::backends::load_backend(ConfigFormat::Opencode, path)?;
+    Ok((load.root, load.agents, load.providers))
 }
 
 /// 兼容包装：失败时回退空状态（供测试与旧调用方使用）。
@@ -1929,11 +1849,8 @@ pub fn load_or_empty(path: &str) -> (Value, Vec<AgentRow>, Vec<ProviderRow>) {
 
 /// 加载 pi-agent 配置（支持本地与 WSL 路径）；读取/解析失败返回 Err。
 pub fn load_pi_agent_result(path: &str) -> Result<(Value, Vec<ProviderRow>, Value), String> {
-    let content = read_config_content(path)?;
-    let v = parse_config_content(&content)?;
-    let providers = convert::load_pi_providers(&v);
-    let extras = convert::load_pi_extras(&v);
-    Ok((v, providers, extras))
+    let load = crate::backends::load_backend(ConfigFormat::PiAgent, path)?;
+    Ok((load.root, load.providers, load.extras))
 }
 
 fn child_role(parent: CompactRole, key: &str) -> CompactRole {
@@ -2099,42 +2016,6 @@ fn compact_variants(value: &Value) -> String {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
-}
-
-/// 将 UI 状态合并进 opencode 目标 root（跨格式保存用）：agent / provider 以 UI 状态 upsert，
-/// 目标已有同名条目被覆盖、不同名条目保留，其余顶层字段原样保留。
-pub fn merge_opencode_root(
-    target_root: &Value,
-    agents: &[AgentRow],
-    providers: &[ProviderRow],
-) -> Value {
-    let mut root = target_root.clone();
-    if let Value::Object(o) = &mut root {
-        let mut am = o
-            .get("agent")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        for a in agents {
-            if !a.key.is_empty() {
-                am.insert(a.key.clone(), a.to_value());
-            }
-        }
-        o.insert("agent".into(), Value::Object(am));
-
-        let mut pm = o
-            .get("provider")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        for p in providers {
-            if !p.key.is_empty() {
-                pm.insert(p.key.clone(), p.to_value());
-            }
-        }
-        o.insert("provider".into(), Value::Object(pm));
-    }
-    root
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
-use crate::util::{is_wsl_path, read_wsl_file, strip_jsonc_comments, wsl_file_exists, wsl_home, wsl_path_exists};
-use std::fs;
+use crate::backends;
+use crate::util::{is_wsl_path, read_wsl_file};
 use std::path::{Path, PathBuf};
 
+/// 配置格式标识。新增后端时在 `backends` 模块实现并注册，这里加变体。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConfigFormat {
     Opencode,
@@ -17,6 +18,7 @@ impl ConfigFormat {
     }
 }
 
+/// 各后端的解析后路径容器（含用户可覆盖的本地路径）。
 pub struct ConfigPaths {
     pub opencode: String,
     pub pi_agent: PathBuf,
@@ -24,105 +26,62 @@ pub struct ConfigPaths {
 
 impl Default for ConfigPaths {
     fn default() -> Self {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_default();
-        let opencode = format!("{}\\.config\\opencode\\opencode.json", home);
-        let pi_agent = PathBuf::from(format!("{}\\.pi\\agent\\models.json", home));
+        let opencode = backends::backend(ConfigFormat::Opencode).default_local_path();
+        let pi_agent = PathBuf::from(backends::backend(ConfigFormat::PiAgent).default_local_path());
         Self { opencode, pi_agent }
     }
 }
 
 impl ConfigPaths {
-    pub fn wsl_paths() -> Option<(String, String)> {
-        let home = wsl_home()?;
-        let opencode = format!("{}/.config/opencode/opencode.json", home);
-        let pi_agent = format!("{}/.pi/agent/models.json", home);
-        Some((opencode, pi_agent))
-    }
-
-    pub fn wsl_target(&self, format: ConfigFormat) -> Option<String> {
-        let (oc, pi) = ConfigPaths::wsl_paths()?;
+    /// 本后端实际使用的本地路径。
+    pub fn local_path(&self, format: ConfigFormat) -> String {
         match format {
-            ConfigFormat::Opencode => {
-                if wsl_file_exists(&oc) {
-                    Some(oc)
-                } else {
-                    None
-                }
-            }
-            ConfigFormat::PiAgent => {
-                if wsl_path_exists(&pi) {
-                    Some(pi)
-                } else {
-                    None
-                }
-            }
+            ConfigFormat::Opencode => self.opencode.clone(),
+            ConfigFormat::PiAgent => self.pi_agent.to_string_lossy().into_owned(),
         }
     }
 
+    /// WSL 侧目标路径（存在时返回）。
+    pub fn wsl_target(&self, format: ConfigFormat) -> Option<String> {
+        backends::wsl_target(format)
+    }
+
+    /// 启动探测：找到第一个本地存在的默认配置。
     pub fn detect() -> Option<(ConfigFormat, String)> {
-        let paths = ConfigPaths::default();
-        if Path::new(&paths.opencode).exists() {
-            return Some((ConfigFormat::Opencode, paths.opencode));
-        }
-        if paths.pi_agent.exists() {
-            return Some((ConfigFormat::PiAgent, paths.pi_agent.to_string_lossy().into_owned()));
+        for b in backends::BACKENDS {
+            let p = b.default_local_path();
+            if Path::new(&p).exists() {
+                return Some((b.id(), p));
+            }
         }
         None
     }
 
-    /// 根据文件内容判别配置格式：含 `providers` 对象且无 `provider` 键时视为 pi-agent。
+    /// 根据文件内容判别配置格式（无扩展名上下文）。
     pub fn detect_from_content(content: &str) -> ConfigFormat {
-        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&strip_jsonc_comments(content)) {
-            if root.get("providers").and_then(|v| v.as_object()).is_some()
-                && root.get("provider").is_none()
-            {
-                return ConfigFormat::PiAgent;
-            }
-        }
-        ConfigFormat::Opencode
+        backends::detect_format(content, "")
     }
 
+    /// 根据路径 + 内容判别配置格式（支持 WSL 路径）。
     pub fn detect_for_path(path: &str) -> (ConfigFormat, String) {
         let content = if is_wsl_path(path) {
             read_wsl_file(path).ok()
         } else {
-            fs::read_to_string(path).ok()
+            std::fs::read_to_string(path).ok()
         };
         if let Some(content) = content {
-            return (Self::detect_from_content(&content), path.to_string());
+            return (backends::detect_format(&content, path), path.to_string());
         }
         (ConfigFormat::Opencode, path.to_string())
     }
 
+    /// 目标是否可用（本地或 WSL）。
     pub fn validate_target(&self, format: ConfigFormat) -> bool {
-        let local_ok = match format {
-            ConfigFormat::Opencode => Path::new(&self.opencode).exists(),
-            ConfigFormat::PiAgent => {
-                self.pi_agent.exists()
-                    || self
-                        .pi_agent
-                        .parent()
-                        .map(|p| p.exists())
-                        .unwrap_or(false)
-            }
-        };
-        local_ok || self.wsl_target(format).is_some()
+        backends::target_available(format, &self.local_path(format))
     }
 
     /// 本地优先：本地文件存在时写本地，否则回落 WSL，最后回退本地默认路径（新建场景）。
     pub fn target_path(&self, format: ConfigFormat) -> String {
-        let local = match format {
-            ConfigFormat::Opencode => self.opencode.clone(),
-            ConfigFormat::PiAgent => self.pi_agent.to_string_lossy().into_owned(),
-        };
-        if Path::new(&local).exists() {
-            return local;
-        }
-        if let Some(wsl) = self.wsl_target(format) {
-            return wsl;
-        }
-        local
+        backends::target_path(format, &self.local_path(format))
     }
 }
