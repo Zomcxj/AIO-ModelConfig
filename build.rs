@@ -21,7 +21,13 @@ print("icon ready:", len(img.tobytes()))
 "#,
             ])
             .output()
-            .unwrap();
+            .unwrap_or_else(|e| {
+                panic!(
+                    "图标转换失败：无法运行 python（{}）。请安装 Python 与 pillow，\n\
+                     或删除 assets/icon.png 以使用内置回退图标",
+                    e
+                )
+            });
         if !output.status.success() {
             eprintln!(
                 "icon.png conversion failed: {}",

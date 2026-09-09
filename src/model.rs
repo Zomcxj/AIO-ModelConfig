@@ -18,6 +18,12 @@ pub struct AgentRow {
     pub haystack: String,
 }
 
+impl Default for AgentRow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentRow {
     pub fn from(key: &str, v: &Value) -> Self {
         let row = Self {
@@ -103,6 +109,12 @@ pub struct ModelRow {
     pub raw: Value,
 }
 
+impl Default for ModelRow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelRow {
     pub fn from(id: &str, v: &Value) -> Self {
         let variants = v
@@ -160,13 +172,21 @@ impl ModelRow {
         }
         m.insert("reasoning".into(), self.reasoning.into());
         m.insert("tool_call".into(), self.tool_call.into());
-        let mut options = m
-            .get("options")
-            .and_then(|o| o.as_object())
-            .cloned()
-            .unwrap_or_default();
-        options.insert("store".into(), self.store.into());
-        m.insert("options".into(), Value::Object(options));
+        // 仅 store=true 时写入；false 时从 raw 移除 store，options 空则整体省略
+        if self.store {
+            let mut options = m
+                .get("options")
+                .and_then(|o| o.as_object())
+                .cloned()
+                .unwrap_or_default();
+            options.insert("store".into(), true.into());
+            m.insert("options".into(), Value::Object(options));
+        } else if let Some(options) = m.get_mut("options").and_then(|o| o.as_object_mut()) {
+            options.remove("store");
+            if options.is_empty() {
+                m.remove("options");
+            }
+        }
         let mut limit = m
             .get("limit")
             .and_then(|l| l.as_object())
@@ -189,14 +209,23 @@ impl ModelRow {
             .filter(|s| !s.is_empty())
             .map(|s| s.into())
             .collect();
-        if !mod_input.is_empty() && !mod_output.is_empty() {
+        // input / output 独立处理：单侧为空只删对应子键，两侧皆空才删整个字段
+        if !mod_input.is_empty() || !mod_output.is_empty() {
             let mut mo = m
                 .get("modalities")
                 .and_then(|x| x.as_object())
                 .cloned()
                 .unwrap_or_default();
-            mo.insert("input".into(), Value::Array(mod_input));
-            mo.insert("output".into(), Value::Array(mod_output));
+            if !mod_input.is_empty() {
+                mo.insert("input".into(), Value::Array(mod_input));
+            } else {
+                mo.remove("input");
+            }
+            if !mod_output.is_empty() {
+                mo.insert("output".into(), Value::Array(mod_output));
+            } else {
+                mo.remove("output");
+            }
             m.insert("modalities".into(), Value::Object(mo));
         } else {
             m.remove("modalities");
@@ -204,13 +233,23 @@ impl ModelRow {
         if self.variants.trim().is_empty() {
             m.remove("variants");
         } else {
+            // 保留 raw 中已有 variant 的原始值（如 reasoningEffort），新选档位默认空对象
+            let raw_variants = m
+                .get("variants")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
             let variants_map: Map<String, Value> = self
                 .variants
                 .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(|v| {
-                    (v.to_string(), Value::Object(Map::new()))
+                .map(|name| {
+                    let val = raw_variants
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(Map::new()));
+                    (name.to_string(), val)
                 })
                 .collect();
             if !variants_map.is_empty() {
@@ -237,6 +276,12 @@ pub struct ProviderRow {
     pub raw: Value,
     pub pi_api: String,
     pub haystack: String,
+}
+
+impl Default for ProviderRow {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProviderRow {

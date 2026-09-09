@@ -1,4 +1,4 @@
-use crate::util::{wsl_file_exists, wsl_home, wsl_path_exists};
+use crate::util::{is_wsl_path, read_wsl_file, strip_jsonc_comments, wsl_file_exists, wsl_home, wsl_path_exists};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -72,15 +72,26 @@ impl ConfigPaths {
         None
     }
 
-    pub fn detect_for_path(path: &str) -> (ConfigFormat, String) {
-        if let Ok(content) = fs::read_to_string(path) {
-            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                if root.get("providers").and_then(|v| v.as_object()).is_some()
-                    && root.get("provider").is_none()
-                {
-                    return (ConfigFormat::PiAgent, path.to_string());
-                }
+    /// 根据文件内容判别配置格式：含 `providers` 对象且无 `provider` 键时视为 pi-agent。
+    pub fn detect_from_content(content: &str) -> ConfigFormat {
+        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&strip_jsonc_comments(content)) {
+            if root.get("providers").and_then(|v| v.as_object()).is_some()
+                && root.get("provider").is_none()
+            {
+                return ConfigFormat::PiAgent;
             }
+        }
+        ConfigFormat::Opencode
+    }
+
+    pub fn detect_for_path(path: &str) -> (ConfigFormat, String) {
+        let content = if is_wsl_path(path) {
+            read_wsl_file(path).ok()
+        } else {
+            fs::read_to_string(path).ok()
+        };
+        if let Some(content) = content {
+            return (Self::detect_from_content(&content), path.to_string());
         }
         (ConfigFormat::Opencode, path.to_string())
     }
@@ -100,13 +111,18 @@ impl ConfigPaths {
         local_ok || self.wsl_target(format).is_some()
     }
 
+    /// 本地优先：本地文件存在时写本地，否则回落 WSL，最后回退本地默认路径（新建场景）。
     pub fn target_path(&self, format: ConfigFormat) -> String {
+        let local = match format {
+            ConfigFormat::Opencode => self.opencode.clone(),
+            ConfigFormat::PiAgent => self.pi_agent.to_string_lossy().into_owned(),
+        };
+        if Path::new(&local).exists() {
+            return local;
+        }
         if let Some(wsl) = self.wsl_target(format) {
             return wsl;
         }
-        match format {
-            ConfigFormat::Opencode => self.opencode.clone(),
-            ConfigFormat::PiAgent => self.pi_agent.to_string_lossy().into_owned(),
-        }
+        local
     }
 }

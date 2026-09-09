@@ -1,4 +1,4 @@
-use aio_model_config::app::load_or_empty;
+use aio_model_config::app::{load_opencode_result, load_or_empty};
 use aio_model_config::model::{AgentRow, ModelRow, ProviderRow};
 use aio_model_config::util::{is_wsl_path, win_to_wsl};
 use serde_json::{json, Map, Value};
@@ -241,4 +241,79 @@ fn win_to_wsl_test() {
     assert_eq!(win_to_wsl("C:/Users/test"), "/mnt/c/Users/test");
     assert_eq!(win_to_wsl("D:/VsPro/project"), "/mnt/d/VsPro/project");
     assert_eq!(win_to_wsl("/home/user"), "/home/user");
+}
+
+#[test]
+fn model_modalities_single_side_kept() {
+    let v = json!({
+        "name": "test",
+        "reasoning": false,
+        "tool_call": false,
+        "limit": { "context": 100, "output": 50 },
+        "modalities": { "input": ["text", "image"], "output": ["text"] }
+    });
+    let mut model = ModelRow::from("m", &v);
+    model.modalities_input = String::new();
+    let out = model.to_value();
+    assert!(
+        out.get("modalities").is_some(),
+        "modalities should survive when one side is empty"
+    );
+    assert!(out["modalities"].get("input").is_none(), "input subkey removed");
+    assert_eq!(out["modalities"]["output"][0], "text", "output side preserved");
+}
+
+#[test]
+fn model_store_omitted_when_false() {
+    let v = json!({ "name": "m", "reasoning": false, "tool_call": false });
+    let model = ModelRow::from("m", &v);
+    let out = model.to_value();
+    assert!(
+        out.get("options").is_none(),
+        "options should be omitted when store=false and raw had none"
+    );
+}
+
+#[test]
+fn model_store_written_when_true() {
+    let mut model = ModelRow::new();
+    model.id = "m".into();
+    model.store = true;
+    let out = model.to_value();
+    assert_eq!(out["options"]["store"], true);
+}
+
+#[test]
+fn model_variants_raw_values_preserved() {
+    let v = json!({
+        "name": "m",
+        "reasoning": false,
+        "tool_call": false,
+        "variants": { "high": { "reasoningEffort": "high" } }
+    });
+    let model = ModelRow::from("m", &v);
+    let out = model.to_value();
+    assert_eq!(
+        out["variants"]["high"]["reasoningEffort"], "high",
+        "variant detail values must survive save"
+    );
+}
+
+#[test]
+fn load_opencode_result_invalid_json_is_err() {
+    let path = tmp_path("invalid_json");
+    fs::write(&path, "{ not valid json !!!").unwrap();
+    let res = load_opencode_result(path.to_str().unwrap());
+    assert!(res.is_err(), "corrupted JSON must return Err");
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn load_opencode_result_nonexistent_is_ok_empty() {
+    let res = load_opencode_result("C:\nonexistent_opencode_test_12345.json");
+    assert!(res.is_ok(), "nonexistent path is a valid new-file scenario");
+    let (v, agents, providers) = res.unwrap();
+    assert!(v.as_object().unwrap().is_empty());
+    assert!(agents.is_empty());
+    assert!(providers.is_empty());
 }

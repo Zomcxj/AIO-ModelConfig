@@ -309,3 +309,36 @@ fn provider_from_row_npm(p: &aio_model_config::model::ProviderRow, npm: &str) ->
     m.insert("models".into(), models.into());
     m.into()
 }
+
+#[test]
+fn thinking_level_map_asymmetric_roundtrip() {
+    let v = json!({
+        "id": "m",
+        "name": "M",
+        "reasoning": true,
+        "thinkingLevelMap": { "high": "max" }
+    });
+    let model = convert::model_from_pi(&v);
+    assert_eq!(model.variants, "max");
+    let out = convert::model_to_pi(&model);
+    assert_eq!(
+        out["thinkingLevelMap"]["high"], "max",
+        "asymmetric mapping keys must survive roundtrip"
+    );
+}
+
+#[test]
+fn anthropic_proxy_url_v1_preserved() {
+    let v = json!({
+        "baseUrl": "https://my-gateway.example/v1",
+        "apiKey": "sk-test",
+        "api": "anthropic-messages",
+        "models": []
+    });
+    let provider = convert::provider_from_pi("proxy", &v);
+    let output = convert::provider_to_pi(&provider);
+    assert_eq!(
+        output["baseUrl"], "https://my-gateway.example/v1",
+        "proxy URLs must not be rewritten"
+    );
+}

@@ -153,16 +153,20 @@ pub fn wsl_home() -> Option<String> {
     }
 }
 
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\\\''"))
+}
+
 pub fn wsl_path_exists(path: &str) -> bool {
     let out = Command::new("wsl")
-        .args(["-e", "sh", "-c", &format!("test -e {} && echo y", path)])
+        .args(["-e", "sh", "-c", &format!("test -e {} && echo y", shell_quote(path))])
         .output();
     matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }
 
 pub fn wsl_file_exists(path: &str) -> bool {
     let out = Command::new("wsl")
-        .args(["-e", "sh", "-c", &format!("test -f {} && echo y", path)])
+        .args(["-e", "sh", "-c", &format!("test -f {} && echo y", shell_quote(path))])
         .output();
     matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }
@@ -191,7 +195,10 @@ pub fn read_wsl_file(path: &str) -> Result<String, String> {
 }
 
 pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
-    let tmp: PathBuf = std::env::temp_dir().join("opencode_config_tmp.json");
+    let tmp: PathBuf = std::env::temp_dir().join(format!(
+        "opencode_config_tmp_{}.json",
+        std::process::id()
+    ));
     fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().replace('\\', "/");
     let tmp_wsl = win_to_wsl(&tmp_str);
@@ -214,4 +221,81 @@ pub fn show_file_dialog() -> Option<String> {
         .add_filter("所有文件", &["*"])
         .pick_file()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// 剥离 JSONC 的行注释、块注释与尾逗号，产出可被 serde_json 解析的 JSON。
+/// 字符串字面量内的注释符与逗号不受影响；注释中的换行保留以维持行号。
+pub fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' => match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    for c2 in chars.by_ref() {
+                        if c2 == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                Some('*') => {
+                    chars.next();
+                    while let Some(c2) = chars.next() {
+                        if c2 == '*' && chars.peek() == Some(&'/') {
+                            chars.next();
+                            break;
+                        }
+                        if c2 == '\n' {
+                            out.push('\n');
+                        }
+                    }
+                }
+                _ => out.push(c),
+            },
+            _ => out.push(c),
+        }
+    }
+    remove_trailing_commas(&out)
+}
+
+/// 移除 `}` / `]` 前的尾逗号（JSONC 允许，严格 JSON 不允许）。
+fn remove_trailing_commas(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }

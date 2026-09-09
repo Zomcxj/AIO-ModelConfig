@@ -1,9 +1,13 @@
 #![cfg(target_os = "windows")]
 
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::OnceLock;
 use std::ffi::c_void;
+
+#[cfg(debug_assertions)]
 use std::io::Write;
+
+#[cfg(debug_assertions)]
+use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -13,19 +17,26 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, SUBCLASSPROC};
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO, SetCursor};
 
+#[cfg(debug_assertions)]
 static DEBUG_FILE: OnceLock<std::sync::Mutex<Option<std::fs::File>>> = OnceLock::new();
 
+/// 仅 debug 构建写调试日志（临时目录），release 构建为空操作。
+#[cfg(debug_assertions)]
 fn debug_log(msg: &str) {
     let guard = DEBUG_FILE.get_or_init(|| std::sync::Mutex::new(None));
     let mut lock = guard.lock().unwrap();
     if lock.is_none() {
-        *lock = std::fs::File::create("D:/VsPro/opencode-tool/cursor_debug.log").ok();
+        let path = std::env::temp_dir().join("opencode_cursor_debug.log");
+        *lock = std::fs::File::create(path).ok();
     }
     if let Some(ref mut f) = *lock {
         let _ = f.write_all(msg.as_bytes());
         let _ = f.flush();
     }
 }
+
+#[cfg(not(debug_assertions))]
+fn debug_log(_msg: &str) {}
 
 static USE_CUSTOM_CURSOR: AtomicBool = AtomicBool::new(false);
 static CURSOR_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -125,6 +136,10 @@ unsafe extern "system" fn cursor_subclass_proc(
     DefSubclassProc(hwnd, u_msg, w_param, l_param)
 }
 
+/// # Safety
+///
+/// `hwnd` 必须是当前进程拥有的有效 Win32 窗口句柄，且每个窗口仅可调用一次；
+/// 内部通过 `SetWindowSubclass` 安装子类过程，调用方需保证窗口消息循环存活期间不重复安装。
 pub unsafe fn init_grabbing_cursor(hwnd: HWND) {
     debug_log(&format!("init_grabbing_cursor hwnd={:?}\r\n", hwnd));
     let hicon = create_icon_from_rgba(

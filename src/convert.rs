@@ -1,10 +1,18 @@
 use crate::model::{ModelRow, ProviderRow};
 use crate::util::{bool_at, nested_list_str, num_at, str_at};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
+
+/// 仅对 Anthropic 官方端点做 /v1 归一化；自定义代理 URL 原样保留。
+fn is_official_anthropic_url(url: &str) -> bool {
+    let u = url.trim_end_matches('/');
+    u == "https://api.anthropic.com/v1" || u == "https://api.anthropic.com"
+}
 
 pub fn npm_to_api(npm: &str) -> String {
     match npm {
         "@ai-sdk/anthropic" => "anthropic-messages".to_string(),
+        "@ai-sdk/google" => "google-generative-ai".to_string(),
         "" | "@ai-sdk/openai" => "openai-completions".to_string(),
         other => other.to_string(),
     }
@@ -13,6 +21,7 @@ pub fn npm_to_api(npm: &str) -> String {
 pub fn api_to_npm(api: &str) -> String {
     match api {
         "anthropic-messages" => "@ai-sdk/anthropic".to_string(),
+        "google-generative-ai" => "@ai-sdk/google".to_string(),
         "openai-completions" | "openai-responses" => String::new(),
         other => other.to_string(),
     }
@@ -63,13 +72,35 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
         obj.insert("maxTokens".into(), Value::Number(out.into()));
     }
     if !m.variants.trim().is_empty() {
-        let thinking_map: Map<String, Value> = m
+        let names: Vec<&str> = m
             .variants
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|v| (v.to_string(), Value::String(v.to_string())))
             .collect();
+        // 若 raw 中已有 thinkingLevelMap 且其值集合与当前选择一致，则原样保留
+        // （保护 {"high":"max"} 这类非对称映射的键）
+        let raw_map = m.raw.get("thinkingLevelMap").and_then(|v| v.as_object());
+        let same_values = raw_map
+            .map(|rm| {
+                let rm_vals: HashSet<String> = rm
+                    .values()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect();
+                let cur: HashSet<String> =
+                    names.iter().map(|s| s.to_string()).collect();
+                rm_vals == cur
+            })
+            .unwrap_or(false);
+        let thinking_map: Map<String, Value> = if same_values {
+            raw_map.unwrap().clone()
+        } else {
+            names
+                .iter()
+                .map(|n| (n.to_string(), Value::String(n.to_string())))
+                .collect()
+        };
         if !thinking_map.is_empty() {
             obj.insert("thinkingLevelMap".into(), Value::Object(thinking_map));
         }
@@ -84,7 +115,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
     let models = v
         .get("models")
         .and_then(|x| x.as_array())
-        .map(|arr| arr.iter().map(|mv| model_from_pi(mv)).collect())
+        .map(|arr| arr.iter().map(model_from_pi).collect())
         .unwrap_or_default();
     let compat = v
         .get("compat")
@@ -125,7 +156,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
         "openai-completions".to_string()
     };
     if !p.base_url.is_empty() {
-        let save_url = if api == "anthropic-messages" {
+        let save_url = if api == "anthropic-messages" && is_official_anthropic_url(&p.base_url) {
             p.base_url.trim_end_matches("/v1").to_string()
         } else {
             p.base_url.clone()
@@ -136,7 +167,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
         obj.insert("apiKey".into(), Value::String(p.api_key.clone()));
     }
     obj.insert("api".into(), Value::String(api));
-    let models: Vec<Value> = p.models.iter().map(|m| model_to_pi(m)).collect();
+    let models: Vec<Value> = p.models.iter().map(model_to_pi).collect();
     obj.insert("models".into(), Value::Array(models));
     Value::Object(obj)
 }

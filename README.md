@@ -8,7 +8,7 @@
 
 - **双格式支持**：同时支持 opencode (`opencode.json`) 与 pi-agent (`models.json`) 配置格式
 - **自动格式检测**：优先加载 opencode，其次 pi-agent
-- **跨格式保存**：可选择保存到 opencode 或 pi-agent（需已安装对应工具）
+- **跨格式保存**：可选择保存到 opencode 或 pi-agent（需已安装对应工具）；写入时会先读取目标文件已有内容，仅合并 Providers/Agents，其余字段保留
 - **Agents / Providers 卡片式管理**
   - 卡片折叠 / 展开（`▶` / `▼`）
   - 拖拽排序：拖动卡片时**仅有目标卡片被高亮**，松手后完成排序
@@ -65,7 +65,7 @@ cargo build --release
 
 ```jsonc
 {
-  "agents": {
+  "agent": {
     "my-agent": {
       "mode": "subagent",
       "description": "我的子代理",
@@ -76,7 +76,7 @@ cargo build --release
       "system": "系统提示词"
     }
   },
-  "providers": {
+  "provider": {
     "openai": {
       "npm": "@ai-sdk/openai",
       "description": "OpenAI 官方",
@@ -153,10 +153,17 @@ cargo build --release
 | 输出限制 | `limit.output` | `maxTokens` |
 | 输入模态 | `modalities.input` | `input` |
 | API 类型 | `npm` | `api` |
-| 推理档位 | `variants` | 不支持 |
+| 推理档位 | `variants`（保留原始详情如 `reasoningEffort`） | `thinkingLevelMap` |
 | 工具调用 | `tool_call` | 不支持 |
 | Agent 定义 | `agent` | 不支持 |
 
 ## 许可证
 
 见 [LICENSE](LICENSE)。
+
+## 平台与安全说明
+
+- 本工具当前**仅支持 Windows**（依赖 Win32 光标子系统、微软雅黑字体路径与 `wsl` 命令）。
+- 配置文件中的 `apiKey` 以**明文**读取与写回（与 opencode / pi-agent 本身的存储方式一致），请勿将配置文件提交到公开仓库。
+- 保存到 opencode / pi-agent 目标时采用“先读后合并”策略：仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留。
+- 本地与 WSL 同时存在同名配置时，保存目标**优先本地路径**，仅本地不存在时回落 WSL。

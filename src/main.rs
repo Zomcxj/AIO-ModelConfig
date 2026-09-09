@@ -9,12 +9,18 @@ const ICON_W: u32 = 256;
 const ICON_H: u32 = 256;
 
 fn main() -> eframe::Result {
-    let mut options = eframe::NativeOptions::default();
-    options.viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1250.0, 820.0])
-        .with_min_inner_size([970.0, 660.0])
-        .with_title("AIO-ModelConfig")
-        .with_icon(egui::IconData { rgba: ICON_BYTES.to_vec(), width: ICON_W, height: ICON_H });
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1250.0, 820.0])
+            .with_min_inner_size([970.0, 660.0])
+            .with_title("AIO-ModelConfig")
+            .with_icon(egui::IconData {
+                rgba: ICON_BYTES.to_vec(),
+                width: ICON_W,
+                height: ICON_H,
+            }),
+        ..Default::default()
+    };
     eframe::run_native(
         "AIO-ModelConfig",
         options,
