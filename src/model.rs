@@ -200,9 +200,9 @@ impl ModelRow {
     pub fn to_value(&self) -> Value {
         // pi/omp/DSH 来源需要转换方言，因此从干净对象构造；opencode 来源
         // 则以 raw 为基底，并只更新 UI 实际改动过的字段。
-        let convert_dialect = self.source_format.is_some_and(|format| {
-            format != ConfigFormat::Opencode
-        });
+        let convert_dialect = self
+            .source_format
+            .is_some_and(|format| format != ConfigFormat::Opencode);
         let mut m = if convert_dialect {
             Map::new()
         } else {
@@ -371,6 +371,16 @@ pub struct ProviderRow {
     pub api_key_secret: String,
     /// 加载时的密钥，用于区分“原本缺失”与“用户明确清空”。
     pub original_api_key_secret: String,
+    /// DSH provider 的 timeoutMs。
+    pub dsh_timeout_ms: String,
+    /// DSH provider 的 retryPolicy.mode。
+    pub dsh_retry_mode: String,
+    /// DSH provider 的 retryPolicy.maxRetries。
+    pub dsh_max_retries: String,
+    /// 加载时的 DSH provider 参数，用于只保存用户实际修改的字段。
+    pub original_dsh_timeout_ms: String,
+    pub original_dsh_retry_mode: String,
+    pub original_dsh_max_retries: String,
     pub timeout: String,
     pub compat: bool,
     pub models: Vec<ModelRow>,
@@ -409,6 +419,12 @@ impl ProviderRow {
             original_api_key_env: String::new(),
             api_key_secret: String::new(),
             original_api_key_secret: String::new(),
+            dsh_timeout_ms: String::new(),
+            dsh_retry_mode: String::new(),
+            dsh_max_retries: String::new(),
+            original_dsh_timeout_ms: String::new(),
+            original_dsh_retry_mode: String::new(),
+            original_dsh_max_retries: String::new(),
             timeout: nested_num(v, &["options", "timeout"]),
             compat,
             models,
@@ -430,6 +446,12 @@ impl ProviderRow {
             original_api_key_env: String::new(),
             api_key_secret: String::new(),
             original_api_key_secret: String::new(),
+            dsh_timeout_ms: String::new(),
+            dsh_retry_mode: "normal".into(),
+            dsh_max_retries: String::new(),
+            original_dsh_timeout_ms: String::new(),
+            original_dsh_retry_mode: "normal".into(),
+            original_dsh_max_retries: String::new(),
             timeout: String::new(),
             compat: true,
             models: Vec::new(),
@@ -443,9 +465,9 @@ impl ProviderRow {
     pub fn to_value(&self) -> Value {
         // pi/omp/DSH 来源全新构造，防止方言键泄漏进 opencode；opencode
         // 来源则以 raw 为基底，只更新发生变化的 provider 字段。
-        let convert_dialect = self.source_format.is_some_and(|format| {
-            format != ConfigFormat::Opencode
-        });
+        let convert_dialect = self
+            .source_format
+            .is_some_and(|format| format != ConfigFormat::Opencode);
         let mut m = if convert_dialect {
             Map::new()
         } else {

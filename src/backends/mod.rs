@@ -9,10 +9,10 @@
 //!   后端只产出 `serde_json::Value` 形式的 root；
 //! - 跨格式保存的合并语义内置于各后端的 `serialize_root`。
 
+pub mod deepseek_harness;
+pub mod oh_my_pi;
 pub mod opencode;
 pub mod pi_agent;
-pub mod oh_my_pi;
-pub mod deepseek_harness;
 
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
@@ -34,8 +34,8 @@ pub struct BackendLoad {
     /// 本后端顶层未知字段：opencode 为整个 root（agent/provider 会被整体替换），
     /// pi 系为 `providers` 之外的顶层字段；DSH 为完整 root。
     pub extras: Value,
-    /// DSH 的默认模型引用；其他后端为 None。
-    pub default_model: Option<(String, String)>,
+    /// DSH 的默认模型引用及默认思考档位。
+    pub default_model: Option<(String, String, String)>,
 }
 
 /// 配置后端：一种 agent 配置格式的加载 / 保存 / 判别 / 路径知识。
@@ -85,17 +85,26 @@ pub trait Backend: Sync {
         providers: &[ProviderRow],
         extras: &Value,
         target_root: Option<&Value>,
-        default_model: Option<&Option<(String, String)>>,
+        default_model: Option<&Option<(String, String, String)>>,
     ) -> Value {
         let mut root = self.serialize_root(agents, providers, extras, target_root);
         if let Some(default_model) = default_model {
             if let Some(object) = root.as_object_mut() {
                 match default_model {
-                    Some((provider, model)) => {
-                        object.insert(
-                            "agent-default-model".into(),
-                            serde_json::json!({ "provider": provider, "model": model }),
-                        );
+                    Some((provider, model, effort)) => {
+                        let mut default = object
+                            .get("agent-default-model")
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        default.insert("provider".into(), Value::String(provider.clone()));
+                        default.insert("model".into(), Value::String(model.clone()));
+                        if effort.trim().is_empty() {
+                            default.remove("reasoningEffort");
+                        } else {
+                            default.insert("reasoningEffort".into(), Value::String(effort.clone()));
+                        }
+                        object.insert("agent-default-model".into(), Value::Object(default));
                     }
                     None => {
                         object.remove("agent-default-model");
@@ -111,11 +120,7 @@ pub trait Backend: Sync {
 
     /// 保存与主配置同级的 sidecar 文件（默认无 sidecar）。
     /// 主配置写入前调用，sidecar 失败会取消本次保存。
-    fn save_sidecars(
-        &self,
-        _path: &str,
-        _providers: &[ProviderRow],
-    ) -> Result<(), String> {
+    fn save_sidecars(&self, _path: &str, _providers: &[ProviderRow]) -> Result<(), String> {
         Ok(())
     }
 

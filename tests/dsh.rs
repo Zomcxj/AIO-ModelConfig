@@ -30,6 +30,10 @@ llm-pi-ai:
       apiKeyEnv: DSH_TEST_KEY
       api: openai-completions
       baseURL: https://example.invalid/v1
+      timeoutMs: 180000
+      retryPolicy:
+        mode: normal
+        maxRetries: 3
       customProviderField: keep-me
       models:
         - id: demo-model
@@ -56,10 +60,13 @@ agent-default-model:
     assert_eq!(load.providers.len(), 1);
     assert_eq!(load.providers[0].api_key_env, "DSH_TEST_KEY");
     assert_eq!(load.providers[0].api_key_secret, "test-only-placeholder");
+    assert_eq!(load.providers[0].dsh_timeout_ms, "180000");
+    assert_eq!(load.providers[0].dsh_retry_mode, "normal");
+    assert_eq!(load.providers[0].dsh_max_retries, "3");
     assert_eq!(load.providers[0].models[0].variants, "medium");
     assert_eq!(
         load.default_model,
-        Some(("demo".to_string(), "demo-model".to_string()))
+        Some(("demo".to_string(), "demo-model".to_string(), "".to_string()))
     );
     assert_eq!(load.root["ui-theme"]["name"], "dark");
     assert_eq!(load.providers[0].raw["customProviderField"], "keep-me");
@@ -117,8 +124,12 @@ fn dsh_cross_format_save_uses_dsh_schema_without_foreign_keys() {
     let backend = backends::backend(ConfigFormat::DeepSeekHarness);
     let mut provider = ProviderRow::new();
     provider.key = "gateway".into();
-    provider.npm = "@ai-sdk/openai-compatible".into();
+    provider.npm = "@ai-sdk/anthropic".into();
+    provider.pi_api = "anthropic-messages".into();
     provider.base_url = "https://gateway.example/v1".into();
+    provider.dsh_timeout_ms = "180000".into();
+    provider.dsh_retry_mode = "normal".into();
+    provider.dsh_max_retries = "3".into();
     provider.api_key = "sk-must-not-enter-dsh-settings".into();
     let mut model = model_harbor::model::ModelRow::new();
     model.id = "m1".into();
@@ -130,8 +141,11 @@ fn dsh_cross_format_save_uses_dsh_schema_without_foreign_keys() {
 
     let root = backend.serialize_root(&[], &[provider], &json!({}), None);
     let saved = &root["llm-pi-ai"]["providers"]["gateway"];
-    assert_eq!(saved["api"], "openai-completions");
-    assert_eq!(saved["baseURL"], "https://gateway.example/v1");
+    assert_eq!(saved["api"], "anthropic-messages");
+    assert_eq!(saved["baseURL"], "https://gateway.example");
+    assert_eq!(saved["timeoutMs"], 180000);
+    assert_eq!(saved["retryPolicy"]["mode"], "normal");
+    assert_eq!(saved["retryPolicy"]["maxRetries"], 3);
     assert!(saved.get("apiKey").is_none());
     assert!(saved.get("baseUrl").is_none());
     assert!(saved["models"][0].get("limit").is_none());
@@ -210,16 +224,22 @@ fn dsh_default_model_update_keeps_root_key_position() {
         "llm-pi-ai": {"providers": {}},
         "after": true
     });
-    let selected = ("demo".to_string(), "demo-model".to_string());
-    let root = backend.serialize_root_with_default(
-        &[],
-        &[],
-        &extras,
-        None,
-        Some(&Some(selected)),
+    let selected = (
+        "demo".to_string(),
+        "demo-model".to_string(),
+        "max".to_string(),
     );
-    let keys: Vec<&str> = root.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, vec!["before", "agent-default-model", "llm-pi-ai", "after"]);
+    let root = backend.serialize_root_with_default(&[], &[], &extras, None, Some(&Some(selected)));
+    let keys: Vec<&str> = root
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["before", "agent-default-model", "llm-pi-ai", "after"]
+    );
 }
 
 #[test]
@@ -233,9 +253,14 @@ fn dsh_default_model_is_serialized_only_when_explicitly_changed() {
     let unchanged = backend.serialize_root_with_default(&[], &providers, &extras, None, None);
     assert_eq!(unchanged["agent-default-model"]["provider"], "old");
 
-    let selected = ("demo".to_string(), "demo-model".to_string());
+    let selected = (
+        "demo".to_string(),
+        "demo-model".to_string(),
+        "max".to_string(),
+    );
     let changed =
         backend.serialize_root_with_default(&[], &providers, &extras, None, Some(&Some(selected)));
     assert_eq!(changed["agent-default-model"]["provider"], "demo");
+    assert_eq!(changed["agent-default-model"]["reasoningEffort"], "max");
     assert_eq!(changed["ui-theme"]["name"], "dark");
 }

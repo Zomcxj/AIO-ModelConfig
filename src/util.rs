@@ -46,6 +46,10 @@ fn number_text(v: &Value) -> String {
     }
 }
 
+pub fn number_text_public(v: &Value) -> String {
+    number_text(v)
+}
+
 pub fn nested_str<'a>(v: &'a Value, path: &[&str]) -> &'a str {
     let mut cur = v;
     for p in path {
@@ -259,7 +263,12 @@ pub fn read_wsl_file(path: &str) -> Result<String, String> {
 /// WSL 侧路径是否为常规文件（单次探测，用于按需读取前的存在性检查）。
 pub fn wsl_file_exists(path: &str) -> bool {
     let out = wsl_command()
-        .args(["-e", "sh", "-c", &format!("test -f {} && echo y", shell_quote(path))])
+        .args([
+            "-e",
+            "sh",
+            "-c",
+            &format!("test -f {} && echo y", shell_quote(path)),
+        ])
         .output();
     matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "y")
 }
@@ -271,7 +280,10 @@ pub fn remove_config(path: &str) -> Result<(), String> {
             .output()
             .map_err(|e| format!("wsl 命令失败: {}", e))?;
         if !out.status.success() {
-            return Err(format!("wsl 删除失败: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(format!(
+                "wsl 删除失败: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
         Ok(())
     } else {
@@ -279,10 +291,8 @@ pub fn remove_config(path: &str) -> Result<(), String> {
     }
 }
 pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
-    let tmp: PathBuf = std::env::temp_dir().join(format!(
-        "model_harbor_tmp_{}.json",
-        std::process::id()
-    ));
+    let tmp: PathBuf =
+        std::env::temp_dir().join(format!("model_harbor_tmp_{}.json", std::process::id()));
     fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().replace('\\', "/");
     let tmp_wsl = win_to_wsl(&tmp_str);
@@ -393,7 +403,6 @@ pub fn config_exists(path: &str) -> bool {
         Path::new(path).is_file()
     }
 }
-
 
 /// 读取配置文件内容（支持本地与 WSL 路径）；不存在返回空串。
 pub fn read_config_content(path: &str) -> Result<String, String> {

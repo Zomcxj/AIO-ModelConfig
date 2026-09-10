@@ -8,9 +8,7 @@ use crate::convert;
 use crate::credentials;
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ModelRow, ProviderRow};
-use crate::util::{
-    parse_yaml_content, read_config_content, wsl_home, WslPathProbe,
-};
+use crate::util::{parse_yaml_content, read_config_content, wsl_home, WslPathProbe};
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -115,7 +113,14 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
     if preserve_raw && m.variants == m.original_variants {
         return Value::Object(order_fields(
             obj,
-            &["id", "name", "contextWindow", "maxTokens", "input", "reasoningEfforts"],
+            &[
+                "id",
+                "name",
+                "contextWindow",
+                "maxTokens",
+                "input",
+                "reasoningEfforts",
+            ],
         ));
     }
     if m.variants.trim().is_empty() {
@@ -146,7 +151,14 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
     }
     Value::Object(order_fields(
         obj,
-        &["id", "name", "contextWindow", "maxTokens", "input", "reasoningEfforts"],
+        &[
+            "id",
+            "name",
+            "contextWindow",
+            "maxTokens",
+            "input",
+            "reasoningEfforts",
+        ],
     ))
 }
 
@@ -159,6 +171,18 @@ fn order_fields(mut object: Map<String, Value>, keys: &[&str]) -> Map<String, Va
     }
     ordered.extend(object);
     ordered
+}
+
+fn dsh_base_url(api: &str, url: &str) -> String {
+    if api != "anthropic-messages" {
+        return url.to_string();
+    }
+    let trimmed = url.trim_end_matches('/');
+    if let Some(stripped) = trimmed.strip_suffix("/v1") {
+        stripped.trim_end_matches('/').to_string()
+    } else {
+        url.to_string()
+    }
 }
 
 fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> ProviderRow {
@@ -178,16 +202,39 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         key: key.to_string(),
         description: String::new(),
         npm: convert::api_to_npm(api),
-        base_url: v
-            .get("baseURL")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        base_url: dsh_base_url(
+            api,
+            v.get("baseURL").and_then(Value::as_str).unwrap_or_default(),
+        ),
         api_key: String::new(),
         api_key_env: env.clone(),
         original_api_key_env: env.clone(),
         api_key_secret: credentials::secret_for(credentials_root, &env),
         original_api_key_secret: credentials::secret_for(credentials_root, &env),
+        dsh_timeout_ms: crate::util::num_at(v, "timeoutMs"),
+        dsh_retry_mode: v
+            .get("retryPolicy")
+            .and_then(|value| value.get("mode"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        dsh_max_retries: v
+            .get("retryPolicy")
+            .and_then(|value| value.get("maxRetries"))
+            .map(crate::util::number_text_public)
+            .unwrap_or_default(),
+        original_dsh_timeout_ms: crate::util::num_at(v, "timeoutMs"),
+        original_dsh_retry_mode: v
+            .get("retryPolicy")
+            .and_then(|value| value.get("mode"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        original_dsh_max_retries: v
+            .get("retryPolicy")
+            .and_then(|value| value.get("maxRetries"))
+            .map(crate::util::number_text_public)
+            .unwrap_or_default(),
         timeout: String::new(),
         compat: true,
         models,
@@ -221,7 +268,9 @@ fn yaml_scalar(value: &Value) -> String {
             if v.is_empty()
                 || v.chars().any(|c| c.is_whitespace() && c != ' ')
                 || v.contains(':')
-                || v.starts_with(['[', ']', '{', '}', '#', '!', '&', '*', '?', '-', '|', '>', '@', '`'])
+                || v.starts_with([
+                    '[', ']', '{', '}', '#', '!', '&', '*', '?', '-', '|', '>', '@', '`',
+                ])
                 || matches!(v.as_str(), "null" | "true" | "false" | "~")
             {
                 serde_yaml_ng::to_string(v)
@@ -241,8 +290,7 @@ fn yaml_scalar(value: &Value) -> String {
 
 fn yaml_quoted(value: &str) -> String {
     // JSON 字符串也是合法的 YAML 双引号字符串，并能可靠转义引号、反斜杠和换行。
-    serde_json::to_string(value)
-        .unwrap_or_else(|_| format!("\"{}\"", value.replace('"', "\\\"")))
+    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value.replace('"', "\\\"")))
 }
 
 fn dsh_scalar(key: &str, value: &Value) -> String {
@@ -265,7 +313,9 @@ fn yaml_flow(value: &Value, quote_strings: bool) -> Option<String> {
             items.iter().map(scalar).collect::<Vec<_>>().join(", ")
         )),
         Value::Object(object)
-            if object.values().all(|v| v.is_string() || v.is_number() || v.is_boolean()) =>
+            if object
+                .values()
+                .all(|v| v.is_string() || v.is_number() || v.is_boolean()) =>
         {
             Some(format!(
                 "{{ {} }}",
@@ -315,7 +365,12 @@ fn render_dsh_value(value: &Value, indent: usize, out: &mut String) {
                         render_dsh_value(child, indent + 2, out);
                     }
                 } else {
-                    out.push_str(&format!("{}{}: {}\n", pad, key_text, dsh_scalar(key, child)));
+                    out.push_str(&format!(
+                        "{}{}: {}\n",
+                        pad,
+                        key_text,
+                        dsh_scalar(key, child)
+                    ));
                 }
             }
         }
@@ -342,7 +397,12 @@ fn render_dsh_value(value: &Value, indent: usize, out: &mut String) {
                                 out.push_str(&format!("{}- {}:\n", pad, key_text));
                                 render_dsh_value(child, indent + 4, out);
                             } else {
-                                out.push_str(&format!("{}- {}: {}\n", pad, key_text, dsh_scalar(key, child)));
+                                out.push_str(&format!(
+                                    "{}- {}: {}\n",
+                                    pad,
+                                    key_text,
+                                    dsh_scalar(key, child)
+                                ));
                             }
                         } else {
                             let flow = if matches!(key.as_str(), "input" | "reasoningEfforts") {
@@ -356,7 +416,12 @@ fn render_dsh_value(value: &Value, indent: usize, out: &mut String) {
                                 out.push_str(&format!("{}  {}:\n", pad, key_text));
                                 render_dsh_value(child, indent + 4, out);
                             } else {
-                                out.push_str(&format!("{}  {}: {}\n", pad, key_text, dsh_scalar(key, child)));
+                                out.push_str(&format!(
+                                    "{}  {}: {}\n",
+                                    pad,
+                                    key_text,
+                                    dsh_scalar(key, child)
+                                ));
                             }
                         }
                     }
@@ -397,7 +462,10 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
     if p.base_url.is_empty() {
         obj.remove("baseURL");
     } else {
-        obj.insert("baseURL".into(), Value::String(p.base_url.clone()));
+        obj.insert(
+            "baseURL".into(),
+            Value::String(dsh_base_url(&dsh_api_for(p), &p.base_url)),
+        );
     }
     if env.is_empty() {
         // DSH 原生 provider 未修改 apiKeyEnv 时保留原始引用名，防止
@@ -417,6 +485,34 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
                 .collect(),
         ),
     );
+    if p.dsh_timeout_ms != p.original_dsh_timeout_ms || !preserve_raw {
+        if let Ok(value) = p.dsh_timeout_ms.parse::<i64>() {
+            obj.insert("timeoutMs".into(), value.into());
+        } else {
+            obj.remove("timeoutMs");
+        }
+    }
+    if p.dsh_retry_mode != p.original_dsh_retry_mode
+        || p.dsh_max_retries != p.original_dsh_max_retries
+        || !preserve_raw
+    {
+        if p.dsh_retry_mode.trim().is_empty() {
+            obj.remove("retryPolicy");
+        } else {
+            let mut policy = obj
+                .get("retryPolicy")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            policy.insert("mode".into(), Value::String(p.dsh_retry_mode.clone()));
+            if let Ok(value) = p.dsh_max_retries.parse::<i64>() {
+                policy.insert("maxRetries".into(), value.into());
+            } else {
+                policy.remove("maxRetries");
+            }
+            obj.insert("retryPolicy".into(), Value::Object(policy));
+        }
+    }
     Value::Object(order_fields(
         obj,
         &["apiKeyEnv", "api", "baseURL", "models"],
@@ -479,6 +575,10 @@ impl Backend for DeepSeekHarnessBackend {
                 Some((
                     m.get("provider")?.as_str()?.to_string(),
                     m.get("model")?.as_str()?.to_string(),
+                    m.get("reasoningEffort")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                 ))
             });
         Ok(BackendLoad {
@@ -524,13 +624,13 @@ impl Backend for DeepSeekHarnessBackend {
         providers: &[ProviderRow],
         extras: &Value,
         target_root: Option<&Value>,
-        default_model: Option<&Option<(String, String)>>,
+        default_model: Option<&Option<(String, String, String)>>,
     ) -> Value {
         let mut root = self.serialize_root(agents, providers, extras, target_root);
         if let Some(default_model) = default_model {
             if let Some(object) = root.as_object_mut() {
                 match default_model {
-                    Some((provider, model)) => {
+                    Some((provider, model, effort)) => {
                         // 直接修改原对象中的值，不 remove + insert；后者会把
                         // agent-default-model 移到 YAML 根节点末尾。
                         let default = object
@@ -541,6 +641,11 @@ impl Backend for DeepSeekHarnessBackend {
                         };
                         default.insert("provider".into(), Value::String(provider.clone()));
                         default.insert("model".into(), Value::String(model.clone()));
+                        if effort.trim().is_empty() {
+                            default.remove("reasoningEffort");
+                        } else {
+                            default.insert("reasoningEffort".into(), Value::String(effort.clone()));
+                        }
                     }
                     None => {
                         object.remove("agent-default-model");
@@ -569,5 +674,30 @@ impl Backend for DeepSeekHarnessBackend {
     }
     fn render(&self, root: &Value, _compact: bool) -> Result<String, String> {
         render_dsh_yaml(root)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dsh_base_url;
+
+    #[test]
+    fn dsh_base_url_strips_v1_only_for_messages_api() {
+        assert_eq!(
+            dsh_base_url("anthropic-messages", "https://example.test/v1"),
+            "https://example.test"
+        );
+        assert_eq!(
+            dsh_base_url("anthropic-messages", "https://example.test/v1/"),
+            "https://example.test"
+        );
+        assert_eq!(
+            dsh_base_url("openai-completions", "https://example.test/v1"),
+            "https://example.test/v1"
+        );
+        assert_eq!(
+            dsh_base_url("anthropic-messages", "https://example.test/v10"),
+            "https://example.test/v10"
+        );
     }
 }
