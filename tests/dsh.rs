@@ -235,8 +235,9 @@ fn dsh_missing_timeout_defaults_to_180000_without_writeback() {
     .unwrap();
     let load = backends::load_backend(ConfigFormat::DeepSeekHarness, settings.to_str().unwrap())
         .expect("DSH 配置应可加载");
-    // 配置没有 timeoutMs 时默认显示 180000ms
+    // 配置没有 timeoutMs 时默认显示 180000ms（DSH 页与 opencode 页一致）
     assert_eq!(load.providers[0].dsh_timeout_ms, "180000");
+    assert_eq!(load.providers[0].timeout, "180000");
     // 未修改时保存不应写回 timeoutMs
     let backend = backends::backend(ConfigFormat::DeepSeekHarness);
     let root = backend.serialize_root(&[], &load.providers, &load.root, None);

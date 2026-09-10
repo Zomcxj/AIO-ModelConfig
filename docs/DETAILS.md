@@ -55,7 +55,7 @@ cargo build --release
 
 **缺省默认值**：配置文件未写 `timeout` 时，opencode 的 `options.timeout` 与 DSH 的 `timeoutMs` 均默认显示 `180000`（ms）；未修改时保存不写回，避免污染配置。DSH 的 `retryPolicy.mode` 缺省显示 `normal`。
 
-保存语义：当前文件属于本页格式且已加载时写当前文件（整体替换）；手动修改了路径但未点“加载”时，仍写该路径但自动切换为“先读后合并”，不会破坏目标文件已有配置；其余情况写该后端默认目标（本地优先、WSL 回落）。跨格式写入采用“先读后合并”，仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留；保存时不产生空对象污染（空列表、空 `limit`/`options` 省略不写）。
+保存语义：当前文件属于本页格式且已加载时写当前文件（整体替换）；手动修改了路径但未点“加载”时，仍写该路径但自动切换为“先读后合并”，不会破坏目标文件已有配置；其余情况写该后端默认目标（Windows 本地路径）。跨格式写入采用“先读后合并”，仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留；保存时不产生空对象污染（空列表、空 `limit`/`options` 省略不写）。
 
 ## 配置文件格式参考
 
@@ -224,23 +224,21 @@ llm-pi-ai:
             medium: medium
 ```
 
-**凭据分离**：`settings.yaml` 只保存 `apiKeyEnv`（引用名），实际密钥保存在同级 `.credentials.yaml` 的 `refs` 下（`refs: { SENSENOVA_API_KEY: sk-... }`）：
+**凭据分离**（仅 DSH）：`settings.yaml` 只保存 `apiKeyEnv`（引用名），实际密钥保存在同级 `.credentials.yaml` 的 `refs` 下（`refs: { SENSENOVA_API_KEY: sk-... }`）：
 
 - 加载 DSH 配置时自动查找同级凭据文件并读取密钥；找不到时密钥为空
 - 密钥在 DSH 页与 opencode / pi-agent / oh-my-pi 页面间同步显示与编辑；保存 DSH 时写回 `.credentials.yaml`（重命名 `apiKeyEnv` 会清理旧 ref，清空密钥默认不删除旧 ref，避免误伤其他配置）
 - 凭据文件中的未知 ref、`records` 等其他字段原样保留
 
-**DSH 注意事项：**
+## 注意事项（所有格式通用）
 
 - `baseURL` 仅在 `api = anthropic-messages` 时去掉末尾 `/v1`（Anthropic 官方域名为根地址），`openai-completions` 等其他 api 必须保留 `/v1`；页面显示与保存均按此规则
-- 默认参数：无 `timeoutMs` 时显示 `180000`，无 `retryPolicy.mode` 时显示 `normal`，未修改不写回
-- provider / model 只保存各自支持的字段，opencode 等方言字段不会泄漏进 DSH
-- 保存以 raw 为基底：未知字段、其他 provider、其他凭据 ref、`records` 及 DSH 顶层未管理字段全部保留；未做任何修改时保留原始 YAML 文本
+- provider / model 只保存各自支持的字段，其他格式的方言字段不会互相泄漏
+- 跨格式写入“先读后合并”：目标文件已有配置与未知字段原样保留；DSH 当前文件保存以 raw 为基底，未做任何修改时保留原始 YAML 文本
 
 ## 平台与安全说明
 
 - 本工具当前**仅支持 Windows**（依赖 Win32 光标子系统、微软雅黑字体路径与 `wsl` 命令）。
 - 配置文件中的 `apiKey` 以**明文**读取与写回（与 opencode / pi-agent 本身的存储方式一致），请勿将配置文件提交到公开仓库；DSH 的实际密钥存放于同级 `.credentials.yaml`，同样为明文，请勿提交。
 - 保存到 opencode / pi-agent 目标时采用“先读后合并”策略：仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留。
-- 本地与 WSL 同时存在同名配置时，保存目标**优先本地路径**，仅本地不存在时回落 WSL。
-- 涉及 WSL 的探测均通过 `wsl` 命令完成，Windows 下统一附加 `CREATE_NO_WINDOW`，不会闪现终端窗口；探测结果进程级缓存（一次批量调用探测全部后端，避免重复拉起 `wsl` 进程阻塞 UI）。
+- 默认保存目标为 Windows 本地路径；WSL 侧仅在勾选「WSL同步」后写入，保存前会按当前页面检测对应 agent 是否已在 WSL 安装（未安装则禁用勾选并跳过同步）。

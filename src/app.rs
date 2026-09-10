@@ -122,7 +122,7 @@ enum PageTarget {
     Current(String),
     /// 路径已修改但未重新加载：按“先读后合并”写入，不破坏目标文件已有配置。
     Modified(String),
-    /// 该后端默认目标（本地优先，WSL 回落）。
+    /// 该后端默认目标（Windows 本地路径；WSL 仅在勾选「WSL同步」后写入）。
     Default(String),
 }
 
@@ -160,7 +160,6 @@ pub struct App {
     targets: Vec<SaveTarget>,
     current_page: ConfigFormat,
     sync_wsl: bool,
-    wsl_any_installed: bool,
     show_agents_section: bool,
     show_providers_section: bool,
     load_error: Option<String>,
@@ -204,7 +203,6 @@ impl Default for App {
             targets: Vec::new(),
             current_page: format,
             sync_wsl: false,
-            wsl_any_installed: false,
             show_agents_section: true,
             show_providers_section: true,
             load_error: None,
@@ -279,21 +277,20 @@ impl eframe::App for App {
 impl App {
     /// 解析各保存目标的可用性与实际路径（避免在渲染循环中频繁拉起 wsl 进程）。
     fn refresh_targets(&mut self) {
+        // 默认目标固定为 Windows 本地路径；WSL 侧仅通过“WSL同步”勾选写入，
+        // 且写入前按页面检测对应 agent 是否已安装。
         self.targets = backends::BACKENDS
             .iter()
             .map(|b| {
                 let id = b.id();
+                let local = self.config_paths.local_path(id);
                 SaveTarget {
                     backend: id,
                     available: self.config_paths.validate_target(id),
-                    path: self.config_paths.target_path(id),
+                    path: local,
                 }
             })
             .collect();
-        // WSL 侧是否有任一 agent 已安装（供 WSL 同步按钮可用性判断）
-        self.wsl_any_installed = backends::BACKENDS
-            .iter()
-            .any(|b| backends::wsl_target(b.id()).is_some());
     }
 
     /// 按 source_format 加载当前 config_path；失败时置空数据并记录 load_error。
@@ -361,6 +358,10 @@ impl App {
                             self.project_dsh_credentials();
                         }
                         self.sync_provider_secrets(id);
+                        // 对应 agent 未在 WSL 安装的页面：关闭并禁用 WSL 同步
+                        if backends::wsl_target(id).is_none() {
+                            self.sync_wsl = false;
+                        }
                         self.current_page = id;
                     }
                 }
@@ -377,13 +378,19 @@ impl App {
                 );
                 // 右侧：WSL 同步 + 主题
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let wsl_tip = if self.wsl_any_installed {
-                        "保存时同步更新 WSL 侧已安装 agent 的配置"
+                    // 按当前页面检测对应 agent 是否已在 WSL 安装
+                    let current = self.current_page;
+                    let wsl_installed = backends::wsl_target(current).is_some();
+                    let wsl_tip = if wsl_installed {
+                        format!("保存时同步写入 WSL 侧 {} 的配置", current.label())
                     } else {
-                        "WSL 中未发现任何 agent（配置文件或其目录均不存在）"
+                        format!(
+                            "WSL 中未检测到 {} 安装（配置文件或其目录均不存在），保存仅写 Windows 本地",
+                            current.label()
+                        )
                     };
                     ui.add_enabled(
-                        self.wsl_any_installed,
+                        wsl_installed,
                         egui::Checkbox::new(&mut self.sync_wsl, "WSL同步"),
                     )
                     .on_hover_text(wsl_tip);
@@ -1271,7 +1278,8 @@ impl App {
         let show_omp = self.current_page == ConfigFormat::OhMyPi;
         let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
         let show_provider_base_url = self.page_has_provider_field("base_url");
-        let show_provider_timeout = self.page_has_provider_field("timeout");
+        // opencode 的 options.timeout 始终显示：文件未写该字段时默认 180000ms
+        let show_provider_timeout = show_oc || self.page_has_provider_field("timeout");
         let show_dsh_retry = self.current_page == ConfigFormat::DeepSeekHarness;
         let show_model_name = self.page_has_model_field("name");
         let show_model_context = self.page_has_model_field("context");
@@ -1442,7 +1450,7 @@ impl App {
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(timeout_label).weak()),
                 );
-                numeric_text_edit(ui, &mut p.timeout, 53.0, "");
+                numeric_text_edit(ui, &mut p.timeout, 70.0, "180000");
             }
             if show_dsh_retry {
                 ui.add_sized(
@@ -2015,7 +2023,7 @@ impl App {
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new(timeout_label).weak()),
                     );
-                    numeric_text_edit(ui, &mut self.new_provider.timeout, 53.0, "180000");
+                    numeric_text_edit(ui, &mut self.new_provider.timeout, 70.0, "180000");
                 }
                 if !show_oc && !show_dsh {
                     ui.add_sized(
@@ -2453,7 +2461,7 @@ impl App {
     /// 本页写入路径：
     /// - 当前文件属于本页格式且已加载 → 当前文件（整体替换）；
     /// - 路径已修改但未加载 → 仍写该路径，但按“先读后合并”（防止覆盖目标文件已有配置）；
-    /// - 其余 → 该后端默认目标（本地优先，WSL 回落）。
+    /// - 其余 → 该后端默认目标（Windows 本地；WSL 需勾选「WSL同步」）。
     fn page_save_path(&self, fmt: ConfigFormat) -> PageTarget {
         if !self.config_path.is_empty() && self.config_path != self.loaded_path {
             // 用户已经在路径框中明确指定了目标文件，即使尚未点击“加载”，
@@ -2482,7 +2490,7 @@ impl App {
                 PageTarget::Modified(p) => (p.clone(), "路径已修改未加载：先读后合并写入", true),
                 PageTarget::Default(p) => {
                     let ok = self.targets.iter().any(|t| t.backend == fmt && t.available);
-                    (p.clone(), "默认目标（本地优先，WSL 回落）", ok)
+                    (p.clone(), "默认目标（Windows 本地；WSL 仅勾选后写入）", ok)
                 }
             };
             if ui
@@ -2560,10 +2568,11 @@ impl App {
                     .push_str(&format!("（已忽略 {} 个无效数字字段）", bad));
             }
         }
-        // WSL 同步：写入路径为本地时，同步到 WSL 侧默认路径（仅 WSL 中已安装的 agent）
+        // WSL 同步：仅勾选“WSL同步”且写入路径为本地时，同步到 WSL 侧默认路径；
+        // 写入前检测对应 agent 是否已安装（未安装则跳过并提示）。
         if self.sync_wsl && ok && !is_wsl_path(&path) {
-            if let Some(wsl_path) = backends::wsl_target(fmt) {
-                match self.save_backend_to(fmt, &wsl_path) {
+            match backends::wsl_target(fmt) {
+                Some(wsl_path) => match self.save_backend_to(fmt, &wsl_path) {
                     Ok(()) => self
                         .status
                         .push_str(&format!("; {}(WSL): 已同步", fmt.label())),
@@ -2571,7 +2580,10 @@ impl App {
                         self.status
                             .push_str(&format!("; {}(WSL): 同步失败({})", fmt.label(), e))
                     }
-                }
+                },
+                None => self
+                    .status
+                    .push_str(&format!("; {}(WSL): 未安装，跳过同步", fmt.label())),
             }
         }
     }

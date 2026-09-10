@@ -232,7 +232,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             .and_then(|value| value.get("maxRetries"))
             .map(crate::util::number_text_public)
             .unwrap_or_default(),
-        original_dsh_timeout_ms: timeout_text,
+        original_dsh_timeout_ms: timeout_text.clone(),
         original_dsh_retry_mode: v
             .get("retryPolicy")
             .and_then(|value| value.get("mode"))
@@ -244,8 +244,9 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             .and_then(|value| value.get("maxRetries"))
             .map(crate::util::number_text_public)
             .unwrap_or_default(),
-        timeout: String::new(),
-        original_timeout: String::new(),
+        // 切到 opencode 页时沿用 DSH 的 timeoutMs（缺省 180000）。
+        timeout: timeout_text.clone(),
+        original_timeout: timeout_text.clone(),
         compat: true,
         models,
         new_model: ModelRow::new(),

@@ -313,6 +313,9 @@ fn provider_options_omitted_when_empty() {
     // 无 baseURL/apiKey/timeout 时不得写入 "options": {} 污染配置
     let v = json!({ "npm": "@ai-sdk/openai", "models": {} });
     let provider = ProviderRow::from("p", &v);
+    // 文件未写 options.timeout 时默认显示 180000（未修改不写回）
+    assert_eq!(provider.timeout, "180000");
+    assert_eq!(provider.original_timeout, "180000");
     let out = provider.to_value();
     assert!(out.get("options").is_none(), "empty options must be omitted");
 }
