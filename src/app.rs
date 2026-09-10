@@ -42,6 +42,56 @@ struct ModelFetchState {
 /// 新增 Provider 表单使用固定的内部 key 保存获取状态。
 const NEW_PROVIDER_FETCH_KEY: &str = "__new_provider__";
 
+/// 吸顶标题占位：在内容流中预留标题行高度，返回绘制锚点。
+/// 必须与 [`sticky_end`] 配对，并在 section 内容渲染完成后调用 sticky_end，
+/// 以保证标题最后绘制（否则会被下方滚动内容覆盖）。
+fn sticky_begin(ui: &mut egui::Ui, height: f32) -> (f32, f32, f32, f32) {
+    let avail = ui.available_rect_before_wrap();
+    ui.allocate_exact_size(egui::vec2(avail.width(), height), egui::Sense::hover());
+    (avail.top(), avail.left(), avail.right(), height)
+}
+
+/// 绘制吸顶标题：未滚过时留在内容流中；滚动越过视口顶部后吸附在滚动区顶部。
+fn sticky_end(ui: &mut egui::Ui, anchor: (f32, f32, f32, f32), paint: impl FnOnce(&mut egui::Ui)) {
+    let (top, left, right, height) = anchor;
+    let clip_top = ui.clip_rect().top();
+    let y = top.max(clip_top);
+    let target = egui::Rect::from_min_max(egui::pos2(left, y), egui::pos2(right, y + height));
+    if !ui.clip_rect().intersects(target) {
+        return;
+    }
+    // 用 new_child 而非 scope_builder：后者会推进父 cursor 到吸顶位置，
+    // 破坏内容流导致滚动区滚轮失效。
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(target));
+    child
+        .painter()
+        .rect_filled(target, 0.0, ui.visuals().panel_fill);
+    paint(&mut child);
+    // 标题下边线：吸顶时也能与内容分隔
+    child.painter().hline(
+        target.x_range(),
+        target.bottom() - 1.0,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+}
+
+/// 错误摘要：HTTP 状态码简写（如 HTTP 403），其他错误截断为短文本。
+fn short_err(err: &str) -> String {
+    if let Some(rest) = err.strip_prefix("HTTP ") {
+        let code = rest.split('（').next().unwrap_or(rest);
+        format!("HTTP {}", code)
+    } else {
+        let t = err.trim();
+        if t.chars().count() > 24 {
+            let mut s: String = t.chars().take(24).collect();
+            s.push('…');
+            s
+        } else {
+            t.to_string()
+        }
+    }
+}
+
 /// 单个 provider 的延迟测试状态（provider 级 + 模型级并发）。
 #[derive(Default)]
 struct LatencyState {
@@ -129,7 +179,11 @@ fn measure_model_latency(
         return Err("缺少 API Key".to_string());
     }
     let url = chat_url(base_url, api);
-    let agent = latency_agent();
+    // 模型延迟测试的读取超时固定 8 秒：超过即视为超时。
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_millis(8000))
+        .build();
     let started = std::time::Instant::now();
     let result = if api == "anthropic-messages" {
         let body = serde_json::json!({
@@ -157,6 +211,9 @@ fn measure_model_latency(
             .send_string(&body.to_string())
     };
     let elapsed = started.elapsed().as_millis() as u64;
+    if elapsed >= 8000 {
+        return Err(format!("超时（{} ms）", elapsed));
+    }
     match result {
         Ok(_) => Ok(elapsed),
         Err(err) => Err(http_error(err, elapsed)),
@@ -375,23 +432,17 @@ impl eframe::App for App {
         self.ui_status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ui_page_header(ui);
-            // Agents / Providers 标题行固定在滚动区外：滚动条下拉后始终显示在顶部。
-            if self.current_page == ConfigFormat::Opencode {
-                self.ui_agents_header(ui);
-            }
-            self.ui_providers_header(ui);
-            ui.add_space(2.0);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .drag_to_scroll(false)
                 .show(ui, |ui| {
                     ui.add_space(4.0);
-                    // Agents 仅属于 opencode 页面
+                    // Agents 仅属于 opencode 页面；区块标题吸顶，滚动时始终显示在顶部。
                     if self.current_page == ConfigFormat::Opencode {
-                        self.ui_agents_body(ui);
+                        self.ui_agents_section(ui);
                         ui.add_space(8.0);
                     }
-                    self.ui_providers_body(ui);
+                    self.ui_providers_section(ui);
                     ui.add_space(8.0);
                 });
         });
@@ -626,80 +677,76 @@ impl App {
             });
     }
 
-    /// Agents 标题行：固定在滚动区外（滚动时始终显示在顶部）。
-    fn ui_agents_header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.strong("Agents");
-            let btn_label = if self.show_agents_section {
-                "隐藏"
-            } else {
-                "展开"
-            };
-            if ui.button(btn_label).clicked() {
-                self.show_agents_section = !self.show_agents_section;
+    /// Agents 区块：标题行吸顶（滚动时始终显示在顶部），内容紧跟其下。
+    fn ui_agents_section(&mut self, ui: &mut egui::Ui) {
+        let anchor = sticky_begin(ui, 30.0);
+        if self.show_agents_section {
+            let matched: Vec<usize> = (0..self.agents.len()).collect();
+
+            if self.agents.is_empty() && !self.show_new_agent {
+                self.show_new_agent = true;
             }
-            if self.show_agents_section && !self.agents.is_empty() {
-                let all_open = self.agents.iter().all(|a| self.agent_open.contains(&a.key));
-                if ui
-                    .button(if all_open {
-                        "收起全部卡片"
-                    } else {
-                        "展开全部卡片"
-                    })
-                    .clicked()
-                {
-                    if all_open {
-                        self.agent_open.clear();
-                    } else {
-                        self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
+
+            let mut to_remove: Option<usize> = None;
+            let mut to_copy: Option<usize> = None;
+            let mut hover_target: Option<String> = None;
+            card_list(ui, &matched, 0.0, |ui, idx| {
+                self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
+            });
+            if let Some(idx) = to_remove {
+                self.agents.remove(idx);
+                self.status = "已删除 agent".into();
+            }
+            if let Some(idx) = to_copy {
+                let mut a = self.agents[idx].clone();
+                a.key = format!("{}_copy", a.key);
+                self.agents.push(a);
+                self.status = "已复制 agent".into();
+            }
+            if self.agent_drag_src.is_some() {
+                self.agent_drag_target = hover_target;
+            } else {
+                self.agent_drag_target = None;
+            }
+
+            ui.add_space(6.0);
+            if ui.button("新增 Agent").clicked() {
+                self.show_new_agent = !self.show_new_agent;
+            }
+            if self.show_new_agent {
+                self.ui_new_agent_form(ui);
+            }
+        }
+        sticky_end(ui, anchor, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Agents");
+                let btn_label = if self.show_agents_section {
+                    "隐藏"
+                } else {
+                    "展开"
+                };
+                if ui.button(btn_label).clicked() {
+                    self.show_agents_section = !self.show_agents_section;
+                }
+                if self.show_agents_section && !self.agents.is_empty() {
+                    let all_open = self.agents.iter().all(|a| self.agent_open.contains(&a.key));
+                    if ui
+                        .button(if all_open {
+                            "收起全部卡片"
+                        } else {
+                            "展开全部卡片"
+                        })
+                        .clicked()
+                    {
+                        if all_open {
+                            self.agent_open.clear();
+                        } else {
+                            self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
+                        }
                     }
                 }
-            }
+            });
         });
-        ui.separator();
-    }
-
-    /// Agents 内容区（标题行固定在滚动区外）。
-    fn ui_agents_body(&mut self, ui: &mut egui::Ui) {
-        if !self.show_agents_section {
-            return;
-        }
-
-        let matched: Vec<usize> = (0..self.agents.len()).collect();
-
-        if self.agents.is_empty() && !self.show_new_agent {
-            self.show_new_agent = true;
-        }
-
-        let mut to_remove: Option<usize> = None;
-        let mut to_copy: Option<usize> = None;
-        let mut hover_target: Option<String> = None;
-        card_list(ui, &matched, 0.0, |ui, idx| {
-            self.render_agent_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
-        });
-        if let Some(idx) = to_remove {
-            self.agents.remove(idx);
-            self.status = "已删除 agent".into();
-        }
-        if let Some(idx) = to_copy {
-            let mut a = self.agents[idx].clone();
-            a.key = format!("{}_copy", a.key);
-            self.agents.push(a);
-            self.status = "已复制 agent".into();
-        }
-        if self.agent_drag_src.is_some() {
-            self.agent_drag_target = hover_target;
-        } else {
-            self.agent_drag_target = None;
-        }
-
-        ui.add_space(6.0);
-        if ui.button("新增 Agent").clicked() {
-            self.show_new_agent = !self.show_new_agent;
-        }
-        if self.show_new_agent {
-            self.ui_new_agent_form(ui);
-        }
     }
 
     fn render_agent_card(
@@ -1351,44 +1398,85 @@ impl App {
         }
     }
 
-    fn ui_providers_header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.strong("Providers");
-            let btn_label = if self.show_providers_section {
-                "隐藏"
-            } else {
-                "展开"
-            };
-            if ui.button(btn_label).clicked() {
-                self.show_providers_section = !self.show_providers_section;
+    /// Providers 区块：标题行吸顶（滚动时始终显示在顶部），内容紧跟其下。
+    fn ui_providers_section(&mut self, ui: &mut egui::Ui) {
+        let anchor = sticky_begin(ui, 30.0);
+        if self.show_providers_section {
+            let matched: Vec<usize> = (0..self.providers.len()).collect();
+
+            if self.providers.is_empty() && !self.show_new_provider {
+                self.show_new_provider = true;
             }
-            if self.show_providers_section && !self.providers.is_empty() {
-                let all_open = self
-                    .providers
-                    .iter()
-                    .all(|p| self.provider_open.contains(&p.key));
-                if ui
-                    .button(if all_open {
-                        "收起全部卡片"
-                    } else {
-                        "展开全部卡片"
-                    })
-                    .clicked()
-                {
-                    if all_open {
-                        self.provider_open.clear();
-                    } else {
-                        self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
+
+            let mut to_remove: Option<usize> = None;
+            let mut to_copy: Option<usize> = None;
+            let mut hover_target: Option<String> = None;
+            card_list(ui, &matched, 0.0, |ui, idx| {
+                self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
+            });
+            if let Some(idx) = to_remove {
+                self.providers.remove(idx);
+                self.status = "已删除 provider".into();
+            }
+            if let Some(idx) = to_copy {
+                let mut p = self.providers[idx].clone();
+                p.key = format!("{}_copy", p.key);
+                self.providers.push(p);
+                self.status = "已复制 provider".into();
+            }
+            if self.provider_drag_src.is_some() {
+                self.provider_drag_target = hover_target;
+            } else {
+                self.provider_drag_target = None;
+            }
+
+            ui.add_space(10.0);
+            if ui.button("新增 Provider").clicked() {
+                self.show_new_provider = !self.show_new_provider;
+            }
+            if self.show_new_provider {
+                self.ui_new_provider_form(ui);
+            }
+        }
+        sticky_end(ui, anchor, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Providers");
+                let btn_label = if self.show_providers_section {
+                    "隐藏"
+                } else {
+                    "展开"
+                };
+                if ui.button(btn_label).clicked() {
+                    self.show_providers_section = !self.show_providers_section;
+                }
+                if self.show_providers_section && !self.providers.is_empty() {
+                    let all_open = self
+                        .providers
+                        .iter()
+                        .all(|p| self.provider_open.contains(&p.key));
+                    if ui
+                        .button(if all_open {
+                            "收起全部卡片"
+                        } else {
+                            "展开全部卡片"
+                        })
+                        .clicked()
+                    {
+                        if all_open {
+                            self.provider_open.clear();
+                        } else {
+                            self.provider_open =
+                                self.providers.iter().map(|p| p.key.clone()).collect();
+                        }
                     }
                 }
-            }
-            // 连通性测试：放在标题行右侧，收起全部卡片时也始终可见。
-            if self.show_providers_section
-                && ui
-                    .button("连通性测试")
-                    .on_hover_text("并发测试当前页面全部厂商的接口连通性")
-                    .clicked()
-            {
+                // 连通性测试：放在标题行右侧，收起全部卡片时也始终可见。
+                if self.show_providers_section
+                    && ui
+                        .button("连通性测试")
+                        .on_hover_text("并发测试当前页面全部厂商的接口连通性")
+                        .clicked()
+                {
                     let targets: Vec<(String, String, String, String)> = self
                         .providers
                         .iter()
@@ -1410,52 +1498,10 @@ impl App {
                     for (key, base, secret, api) in targets {
                         Self::start_provider_latency(&mut self.latency, &key, &base, &secret, &api);
                     }
-                    self.status = format!("已开始一键延迟测试（{} 个厂商）", count);
-            }
+                    self.status = format!("已开始连通性测试（{} 个厂商）", count);
+                }
+            });
         });
-        ui.separator();
-    }
-
-    fn ui_providers_body(&mut self, ui: &mut egui::Ui) {
-        if !self.show_providers_section {
-            return;
-        }
-
-        let matched: Vec<usize> = (0..self.providers.len()).collect();
-
-        if self.providers.is_empty() && !self.show_new_provider {
-            self.show_new_provider = true;
-        }
-
-        let mut to_remove: Option<usize> = None;
-        let mut to_copy: Option<usize> = None;
-        let mut hover_target: Option<String> = None;
-        card_list(ui, &matched, 0.0, |ui, idx| {
-            self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
-        });
-        if let Some(idx) = to_remove {
-            self.providers.remove(idx);
-            self.status = "已删除 provider".into();
-        }
-        if let Some(idx) = to_copy {
-            let mut p = self.providers[idx].clone();
-            p.key = format!("{}_copy", p.key);
-            self.providers.push(p);
-            self.status = "已复制 provider".into();
-        }
-        if self.provider_drag_src.is_some() {
-            self.provider_drag_target = hover_target;
-        } else {
-            self.provider_drag_target = None;
-        }
-
-        ui.add_space(10.0);
-        if ui.button("新增 Provider").clicked() {
-            self.show_new_provider = !self.show_new_provider;
-        }
-        if self.show_new_provider {
-            self.ui_new_provider_form(ui);
-        }
     }
 
     fn render_provider_card(
@@ -1511,6 +1557,28 @@ impl App {
                     }
                 }
                 ui.strong(&self.providers[idx].key);
+                // 连通性测试结果：显示在厂商名字右侧，卡片收起时也可见。
+                if let Some(state) = self.latency.get(&key) {
+                    if state.provider_rx.is_some() {
+                        ui.add(egui::Spinner::new().size(12.0));
+                    } else if let Some(res) = &state.provider {
+                        match res {
+                            Ok(ms) => {
+                                ui.label(
+                                    egui::RichText::new(format!("{}ms", ms))
+                                        .color(egui::Color32::from_rgb(90, 180, 110)),
+                                );
+                            }
+                            Err(err) => {
+                                ui.label(
+                                    egui::RichText::new(short_err(err))
+                                        .color(egui::Color32::from_rgb(220, 90, 90)),
+                                )
+                                .on_hover_text(err);
+                            }
+                        }
+                    }
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("删除").clicked() {
                         *to_remove = Some(idx);
@@ -1746,7 +1814,6 @@ impl App {
         ui.add_space(2.0);
         let mut fetch_request: Option<(String, String, String, String)> = None;
         let mut close_fetch = false;
-        let mut latency_provider: Option<(String, String, String, String)> = None;
         let mut latency_models: Option<(String, String, Vec<String>, String)> = None;
         ui.horizontal(|ui| {
             ui.strong("Models");
@@ -1767,14 +1834,6 @@ impl App {
             if self.model_fetch_open.contains(&p.key) && ui.button("关闭").clicked() {
                 close_fetch = true;
             }
-            if ui.button("延迟测试").clicked() {
-                latency_provider = Some((
-                    p.key.clone(),
-                    p.base_url.clone(),
-                    fetch_secret.clone(),
-                    fetch_api.clone(),
-                ));
-            }
             if ui.button("模型延迟").clicked() {
                 latency_models = Some((
                     p.key.clone(),
@@ -1788,25 +1847,6 @@ impl App {
                 ));
             }
             if let Some(state) = self.latency.get(&p.key) {
-                if state.provider_rx.is_some() {
-                    ui.add(egui::Spinner::new().size(12.0));
-                } else if let Some(res) = &state.provider {
-                    match res {
-                        Ok(ms) => {
-                            ui.label(
-                                egui::RichText::new(format!("provider {} ms", ms))
-                                    .color(egui::Color32::from_rgb(90, 180, 110)),
-                            );
-                        }
-                        Err(err) => {
-                            ui.label(
-                                egui::RichText::new("provider 延迟失败")
-                                    .color(egui::Color32::from_rgb(220, 90, 90)),
-                            )
-                            .on_hover_text(err);
-                        }
-                    }
-                }
                 if state.model_rx.is_some() {
                     ui.label(
                         egui::RichText::new(format!("模型 {}/{}", state.done, state.total))
@@ -1815,9 +1855,6 @@ impl App {
                 }
             }
         });
-        if let Some((key, base, secret, api)) = latency_provider {
-            Self::start_provider_latency(&mut self.latency, &key, &base, &secret, &api);
-        }
         if let Some((key, base, models, api)) = latency_models {
             let secret = credentials::effective_secret(p);
             if let Some(msg) =
@@ -1949,13 +1986,13 @@ impl App {
                             match res {
                                 Ok(ms) => {
                                     ui.label(
-                                        egui::RichText::new(format!("延迟: {} ms", ms))
+                                        egui::RichText::new(format!("{}ms", ms))
                                             .color(egui::Color32::from_rgb(90, 180, 110)),
                                     );
                                 }
                                 Err(err) => {
                                     ui.label(
-                                        egui::RichText::new("延迟失败")
+                                        egui::RichText::new(short_err(err))
                                             .color(egui::Color32::from_rgb(220, 90, 90)),
                                     )
                                     .on_hover_text(err);
@@ -2084,9 +2121,6 @@ impl App {
                                 p.models[j].variants = selected_variants.join(", ");
                             }
                         }
-                    }
-                    if ui.button("删").clicked() {
-                        rm = Some(j);
                     }
                 });
             });
@@ -2442,7 +2476,6 @@ impl App {
             ui.add_space(2.0);
             let mut fetch_request: Option<(String, String, String)> = None;
             let mut close_fetch = false;
-            let mut latency_provider: Option<(String, String, String)> = None;
             let mut latency_models: Option<(String, Vec<String>, String)> = None;
             ui.horizontal(|ui| {
                 ui.strong("Models");
@@ -2464,13 +2497,6 @@ impl App {
                 {
                     close_fetch = true;
                 }
-                if ui.button("延迟测试").clicked() {
-                    latency_provider = Some((
-                        self.new_provider.base_url.clone(),
-                        fetch_secret.clone(),
-                        fetch_api.clone(),
-                    ));
-                }
                 if ui.button("模型延迟").clicked() {
                     latency_models = Some((
                         self.new_provider.base_url.clone(),
@@ -2484,25 +2510,6 @@ impl App {
                     ));
                 }
                 if let Some(state) = self.latency.get(NEW_PROVIDER_FETCH_KEY) {
-                    if state.provider_rx.is_some() {
-                        ui.add(egui::Spinner::new().size(12.0));
-                    } else if let Some(res) = &state.provider {
-                        match res {
-                            Ok(ms) => {
-                                ui.label(
-                                    egui::RichText::new(format!("provider {} ms", ms))
-                                        .color(egui::Color32::from_rgb(90, 180, 110)),
-                                );
-                            }
-                            Err(err) => {
-                                ui.label(
-                                    egui::RichText::new("provider 延迟失败")
-                                        .color(egui::Color32::from_rgb(220, 90, 90)),
-                                )
-                                .on_hover_text(err);
-                            }
-                        }
-                    }
                     if state.model_rx.is_some() {
                         ui.label(
                             egui::RichText::new(format!("模型 {}/{}", state.done, state.total))
@@ -2511,15 +2518,6 @@ impl App {
                     }
                 }
             });
-            if let Some((base, secret, api)) = latency_provider {
-                Self::start_provider_latency(
-                    &mut self.latency,
-                    NEW_PROVIDER_FETCH_KEY,
-                    &base,
-                    &secret,
-                    &api,
-                );
-            }
             if let Some((base, models, api)) = latency_models {
                 let secret = credentials::effective_secret(&self.new_provider);
                 if let Some(msg) = Self::start_models_latency(
@@ -2636,13 +2634,13 @@ impl App {
                                 match res {
                                     Ok(ms) => {
                                         ui.label(
-                                            egui::RichText::new(format!("延迟: {} ms", ms))
+                                            egui::RichText::new(format!("{}ms", ms))
                                                 .color(egui::Color32::from_rgb(90, 180, 110)),
                                         );
                                     }
                                     Err(err) => {
                                         ui.label(
-                                            egui::RichText::new("延迟失败")
+                                            egui::RichText::new(short_err(err))
                                                 .color(egui::Color32::from_rgb(220, 90, 90)),
                                         )
                                         .on_hover_text(err);

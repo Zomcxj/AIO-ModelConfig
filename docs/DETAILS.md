@@ -51,9 +51,23 @@ cargo build --release
 - 地址：`{baseURL}/models`；`anthropic-messages` 固定使用 `/v1/models`（`baseURL` 已去 `/v1` 时自动补回）
 - 鉴权：`anthropic-messages` 用 `x-api-key` + `anthropic-version`，其余用 `Authorization: Bearer`
 - 解析兼容 `data` / `models` / 裸数组三种响应格式（含 Gemini 式 `name: models/...` 前缀清理与去重）
+- 展示：最多 5 列 checkbox 网格，可见高度固定 15 行（约），超出部分在卡片内垂直滚动（滚动条始终可见）；获取中显示 Spinner 进度
 - 已配置的模型自动打勾；勾选未配置的模型即新增一行 `ModelRow`；取消勾选不删除既有配置，避免误伤已填写的模型参数
 
-**缺省默认值**：配置文件未写 `timeout` 时，opencode 的 `options.timeout` 与 DSH 的 `timeoutMs` 均默认显示 `180000`（ms）；未修改时保存不写回，避免污染配置。DSH 的 `retryPolicy.mode` 缺省显示 `normal`。
+## 延迟 / 连通性测试
+
+- **厂商连通性**：Providers 标题行右侧「连通性测试」按钮，对当前页面全部厂商并发（每个厂商一个后台线程）请求其 `/models` 接口并测量往返耗时；结果直接显示在各厂商卡片名字右侧：`123ms`（绿）或错误码（红，如 `HTTP 403`，悬停显示完整错误）；测试中显示 Spinner。卡片收起时该显示依然可见
+- **模型延迟**：每个 provider 的 Models 标题右侧「模型延迟」按钮，对**全部已配置模型**并发发最小请求（`max_tokens=1`，OpenAI 兼容用 `chat/completions`、`anthropic-messages` 用 `/v1/messages`），每批 8 个并发；结果逐个回传，实时显示进度 `模型 3/21`，每个模型卡片头部显示 `123ms`（绿）或错误码（红，悬停看详情）
+- 超时：模型延迟测试读取超时固定 8 秒，超过判为 `超时（xxxx ms）`；连接错误（DNS/断连）直接报网络错误摘要
+- 请求会消耗极少量 token（单条最短对话），请勿在计费敏感账号上频繁测试
+
+## 界面布局
+
+- 顶栏各 agent 按钮只显示图标，鼠标悬停提示名称
+- Agents / Providers 区块标题行吸顶：内容滚动时标题吸附在滚动区顶部（面板色背景 + 下边线），始终可见；区块内容紧跟各自标题下方
+- 模型卡片头部为一行：`拖动 延迟显示 …… 删除（右对齐）`，字段（id/name/…）在下一行
+
+**缺省默认值**：配置文件未写 `timeout` 时，opencode 的 `options.timeout` 与 DSH 的 `timeoutMs` 均默认显示 `180000`（ms）；未修改时保存不写回，避免污染配置。DSH 的 `retryPolicy.mode` 缺省显示 `normal`。pi/omp 的 `compat.requiresReasoningContentOnAssistantMessages`（pi）与 `compat.requiresReasoningContentForAllAssistantTurns`（omp）为相互映射字段，加载 opencode / DSH 或新建时默认不勾选（false）；跨格式保存时写出当前值，同格式未修改保留 raw 原样。
 
 保存语义：当前文件属于本页格式且已加载时写当前文件（整体替换）；手动修改了路径但未点“加载”时，仍写该路径但自动切换为“先读后合并”，不会破坏目标文件已有配置；其余情况写该后端默认目标（Windows 本地路径）。跨格式写入采用“先读后合并”，仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留；保存时不产生空对象污染（空列表、空 `limit`/`options` 省略不写）。
 
