@@ -206,7 +206,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             api,
             v.get("baseURL").and_then(Value::as_str).unwrap_or_default(),
         ),
-        api_key: String::new(),
+        api_key: credentials::secret_for(credentials_root, &env),
         api_key_env: env.clone(),
         original_api_key_env: env.clone(),
         api_key_secret: credentials::secret_for(credentials_root, &env),

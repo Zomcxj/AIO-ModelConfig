@@ -8,7 +8,7 @@ use crate::ui::{card_frame, card_list, move_item, numeric_text_edit, DragHandle}
 use crate::util::{self, is_wsl_path, parse_number_text, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum SaveFormat {
@@ -31,6 +31,88 @@ struct SaveTarget {
     backend: ConfigFormat,
     available: bool,
     path: String,
+}
+
+/// 单个 provider 的模型获取状态（后台线程 + 通道）。
+struct ModelFetchState {
+    rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    result: Option<Result<Vec<String>, String>>,
+}
+
+/// 新增 Provider 表单使用固定的内部 key 保存获取状态。
+const NEW_PROVIDER_FETCH_KEY: &str = "__new_provider__";
+
+/// 调用 OpenAI 兼容 /models 接口获取模型 id 列表（后台线程内执行）。
+fn fetch_models_remote(url: &str, secret: &str, api: &str) -> Result<Vec<String>, String> {
+    if url.is_empty() {
+        return Err("缺少 baseURL，无法获取模型".to_string());
+    }
+    if secret.is_empty() {
+        return Err("缺少 API Key，无法获取模型".to_string());
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build();
+    let mut request = agent
+        .get(url)
+        .set("User-Agent", "model-harbor")
+        .set("Accept", "application/json");
+    if api == "anthropic-messages" {
+        request = request
+            .set("x-api-key", secret)
+            .set("anthropic-version", "2023-06-01");
+    } else {
+        request = request.set("Authorization", &format!("Bearer {}", secret));
+    }
+    let response = request.call().map_err(|err| match err {
+        ureq::Error::Status(code, resp) => format!("HTTP {}：{}", code, resp.status_text()),
+        ureq::Error::Transport(transport) => format!("网络错误：{}", transport),
+    })?;
+    let text = response.into_string().map_err(|err| err.to_string())?;
+    parse_models_response(&text)
+}
+
+/// 解析 /models 响应中的模型 id（兼容 OpenAI/Anthropic/Gemini 等格式）。
+fn parse_models_response(text: &str) -> Result<Vec<String>, String> {
+    let root: Value = serde_json::from_str(text).map_err(|err| {
+        let snippet = text.chars().take(160).collect::<String>();
+        format!("响应不是合法 JSON（{}）：{}", err, snippet)
+    })?;
+    if let Some(error) = root.get("error") {
+        let msg = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or("未知错误");
+        return Err(msg.to_string());
+    }
+    fn push_ids(item: &Value, seen: &mut HashSet<String>, ids: &mut Vec<String>) {
+        let raw = item
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("name").and_then(Value::as_str))
+            .unwrap_or("");
+        let id = raw.trim().trim_start_matches("models/").to_string();
+        if !id.is_empty() && seen.insert(id.clone()) {
+            ids.push(id);
+        }
+    }
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if let Some(arr) = root.as_array() {
+        for item in arr {
+            push_ids(item, &mut seen, &mut ids);
+        }
+    }
+    for key in ["data", "models"] {
+        if let Some(arr) = root.get(key).and_then(Value::as_array) {
+            for item in arr {
+                push_ids(item, &mut seen, &mut ids);
+            }
+        }
+    }
+    Ok(ids)
 }
 
 /// 本页写入路径的解析结果。
@@ -65,6 +147,10 @@ pub struct App {
     provider_drag_target: Option<String>,
     model_drag_src: Option<String>,
     model_drag_target: Option<String>,
+    /// 每个 provider 的模型获取状态（key → 状态）。
+    model_fetch: HashMap<String, ModelFetchState>,
+    /// 已展开的模型获取面板（provider key）。
+    model_fetch_open: HashSet<String>,
     theme: Theme,
     save_format: SaveFormat,
     /// 滚轮切换保存格式的门门：一次连续滚动手势只切换一次。
@@ -111,6 +197,8 @@ impl Default for App {
             provider_drag_target: None,
             model_drag_src: None,
             model_drag_target: None,
+            model_fetch: HashMap::new(),
+            model_fetch_open: HashSet::new(),
             theme: Theme::default(),
             save_format: SaveFormat::default(),
             save_format_wheel_latch: false,
@@ -164,6 +252,7 @@ impl eframe::App for App {
                 })
                 .collect();
         }
+        self.poll_model_fetch();
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -248,6 +337,9 @@ impl App {
         }
         self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
         self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
+        // 重新加载后丢弃旧的模型获取状态
+        self.model_fetch.clear();
+        self.model_fetch_open.clear();
         // 加载后跳转到来源格式对应的页面
         self.current_page = self.source_format;
         self.refresh_targets();
@@ -281,6 +373,7 @@ impl App {
                         {
                             self.project_dsh_credentials();
                         }
+                        self.sync_provider_secrets(id);
                         self.current_page = id;
                     }
                 }
@@ -967,11 +1060,86 @@ impl App {
             if provider.api_key_env.trim().is_empty() {
                 provider.api_key_env = credentials::default_env_name(&provider.key);
             }
-            if provider.api_key_secret.is_empty()
-                && provider.source_format != Some(ConfigFormat::DeepSeekHarness)
-            {
-                provider.api_key_secret = provider.api_key.clone();
+        }
+    }
+
+    /// 页面切换时保持 provider 密钥一致：DSH 页使用 api_key_secret（对应
+    /// .credentials.yaml 的 refs），其他页面使用 api_key。切换时把非空值
+    /// 同步到目标页字段；若用户在 DSH 页明确清空过密钥（原本有、当前空），
+    /// 不再用其他页面的旧值覆盖。
+    fn sync_provider_secrets(&mut self, target: ConfigFormat) {
+        for provider in &mut self.providers {
+            if target == ConfigFormat::DeepSeekHarness {
+                let cleared_on_dsh = !provider.original_api_key_secret.is_empty()
+                    && provider.api_key_secret.is_empty();
+                if !provider.api_key.trim().is_empty() && !cleared_on_dsh {
+                    provider.api_key_secret = provider.api_key.clone();
+                }
+            } else if !provider.api_key_secret.trim().is_empty() {
+                provider.api_key = provider.api_key_secret.clone();
             }
+        }
+    }
+
+    /// 按 provider 的 api 类型构造模型列表接口地址。
+    fn models_url(base_url: &str, api: &str) -> String {
+        let base = base_url.trim().trim_end_matches('/');
+        if base.is_empty() {
+            return String::new();
+        }
+        if api == "anthropic-messages" {
+            // Anthropic 的模型接口固定为 /v1/models。
+            if base.ends_with("/v1") {
+                format!("{}/models", base)
+            } else {
+                format!("{}/v1/models", base)
+            }
+        } else {
+            format!("{}/models", base)
+        }
+    }
+
+    /// 启动后台线程获取 provider 模型列表。
+    fn start_model_fetch(&mut self, key: &str, base_url: &str, secret: &str, api: &str) {
+        let url = Self::models_url(base_url, api);
+        let secret = secret.trim().to_string();
+        let api = api.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = fetch_models_remote(&url, &secret, &api);
+            let _ = tx.send(result);
+        });
+        self.model_fetch.insert(
+            key.to_string(),
+            ModelFetchState {
+                rx: Some(rx),
+                result: None,
+            },
+        );
+    }
+
+    /// 每帧轮询后台线程的模型获取结果，并更新状态栏。
+    fn poll_model_fetch(&mut self) {
+        let mut finished: Vec<String> = Vec::new();
+        for (key, state) in self.model_fetch.iter_mut() {
+            if let Some(rx) = &state.rx {
+                if let Ok(result) = rx.try_recv() {
+                    state.result = Some(result);
+                    state.rx = None;
+                    finished.push(key.clone());
+                }
+            }
+        }
+        for key in finished {
+            let msg = match &self.model_fetch[&key].result {
+                Some(Ok(models)) if models.is_empty() => {
+                    format!("接口未返回任何模型（{}）", key)
+                }
+                Some(Ok(models)) => format!("已获取 {} 个模型（{}）", models.len(), key),
+                Some(Err(err)) => format!("获取模型失败（{}）: {}", key, err),
+                _ => continue,
+            };
+            self.status = msg;
         }
     }
 
@@ -1290,6 +1458,18 @@ impl App {
                         }
                     });
             }
+            if show_dsh_retry {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("retryPolicy.mode").weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.dsh_retry_mode).desired_width(100.0));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("maxRetries").weak()),
+                );
+                numeric_text_edit(ui, &mut p.dsh_max_retries, 55.0, "3");
+            }
         });
         ui.horizontal(|ui| {
             if show_provider_base_url {
@@ -1312,18 +1492,6 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key_secret).desired_width(240.0));
             } else {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
-            }
-            if show_dsh_retry {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("retryPolicy.mode").weak()),
-                );
-                ui.add(egui::TextEdit::singleline(&mut p.dsh_retry_mode).desired_width(100.0));
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("maxRetries").weak()),
-                );
-                numeric_text_edit(ui, &mut p.dsh_max_retries, 55.0, "3");
             }
             if show_oc && show_provider_timeout {
                 ui.add_sized(
@@ -1349,7 +1517,80 @@ impl App {
         });
 
         ui.add_space(2.0);
-        ui.strong("Models");
+        let mut fetch_request: Option<(String, String, String, String)> = None;
+        let mut close_fetch = false;
+        ui.horizontal(|ui| {
+            ui.strong("Models");
+            let fetch_api = if p.pi_api.is_empty() {
+                convert::npm_to_api(&p.npm)
+            } else {
+                p.pi_api.clone()
+            };
+            let fetch_secret = credentials::effective_secret(p);
+            if ui.button("获取模型").clicked() {
+                fetch_request =
+                    Some((p.key.clone(), p.base_url.clone(), fetch_secret, fetch_api));
+            }
+            if self.model_fetch_open.contains(&p.key) && ui.button("关闭").clicked() {
+                close_fetch = true;
+            }
+        });
+        if let Some((key, base, secret, api)) = fetch_request {
+            // 后台线程拉取模型列表（避免阻塞 UI），结果经通道回传。
+            let url = Self::models_url(&base, &api);
+            let secret = secret.trim().to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = fetch_models_remote(&url, &secret, &api);
+                let _ = tx.send(result);
+            });
+            self.model_fetch.insert(
+                key.clone(),
+                ModelFetchState {
+                    rx: Some(rx),
+                    result: None,
+                },
+            );
+            self.model_fetch_open.insert(key);
+        }
+        if close_fetch {
+            self.model_fetch_open.remove(&p.key);
+        }
+        if self.model_fetch_open.contains(&p.key) {
+            if let Some(state) = self.model_fetch.get(&p.key) {
+                if state.rx.is_some() {
+                    ui.label(egui::RichText::new("正在获取模型…").weak());
+                } else if let Some(result) = &state.result {
+                    match result {
+                        Ok(models) if models.is_empty() => {
+                            ui.label(egui::RichText::new("接口未返回任何模型").weak());
+                        }
+                        Ok(models) => {
+                            let ids = models.clone();
+                            ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
+                            for id in ids {
+                                let mut checked = p.models.iter().any(|m| m.id.trim() == id);
+                                if ui.checkbox(&mut checked, &id).changed() && checked {
+                                    let mut row = ModelRow::new();
+                                    row.id = id.clone();
+                                    row.name = id.clone();
+                                    row.source_format = Some(self.current_page);
+                                    p.models.push(row);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            ui.label(
+                                egui::RichText::new(format!("获取失败：{}", err))
+                                    .color(egui::Color32::from_rgb(220, 90, 90)),
+                            );
+                        }
+                    }
+                }
+            } else {
+                ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
+            }
+        }
         let mut rm: Option<usize> = None;
         let mut model_hover_target: Option<String> = None;
         let mut model_drag_stopped = false;
@@ -1838,7 +2079,75 @@ impl App {
                 }
             });
             ui.add_space(2.0);
-            ui.strong("Models");
+            let mut fetch_request: Option<(String, String, String)> = None;
+            let mut close_fetch = false;
+            ui.horizontal(|ui| {
+                ui.strong("Models");
+                let fetch_api = if self.new_provider.pi_api.is_empty() {
+                    convert::npm_to_api(&self.new_provider.npm)
+                } else {
+                    self.new_provider.pi_api.clone()
+                };
+                let fetch_secret = credentials::effective_secret(&self.new_provider);
+                if ui.button("获取模型").clicked() {
+                    fetch_request = Some((
+                        self.new_provider.base_url.clone(),
+                        fetch_secret,
+                        fetch_api,
+                    ));
+                }
+                if self.model_fetch_open.contains(NEW_PROVIDER_FETCH_KEY)
+                    && ui.button("关闭").clicked()
+                {
+                    close_fetch = true;
+                }
+            });
+            if let Some((base, secret, api)) = fetch_request {
+                self.start_model_fetch(NEW_PROVIDER_FETCH_KEY, &base, &secret, &api);
+                self.model_fetch_open.insert(NEW_PROVIDER_FETCH_KEY.to_string());
+            }
+            if close_fetch {
+                self.model_fetch_open.remove(NEW_PROVIDER_FETCH_KEY);
+            }
+            if self.model_fetch_open.contains(NEW_PROVIDER_FETCH_KEY) {
+                if let Some(state) = self.model_fetch.get(NEW_PROVIDER_FETCH_KEY) {
+                    if state.rx.is_some() {
+                        ui.label(egui::RichText::new("正在获取模型…").weak());
+                    } else if let Some(result) = &state.result {
+                        match result {
+                            Ok(models) if models.is_empty() => {
+                                ui.label(egui::RichText::new("接口未返回任何模型").weak());
+                            }
+                            Ok(models) => {
+                                let ids = models.clone();
+                                ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
+                                for id in ids {
+                                    let mut checked = self
+                                        .new_provider
+                                        .models
+                                        .iter()
+                                        .any(|m| m.id.trim() == id);
+                                    if ui.checkbox(&mut checked, &id).changed() && checked {
+                                        let mut row = ModelRow::new();
+                                        row.id = id.clone();
+                                        row.name = id.clone();
+                                        row.source_format = Some(self.current_page);
+                                        self.new_provider.models.push(row);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                ui.label(
+                                    egui::RichText::new(format!("获取失败：{}", err))
+                                        .color(egui::Color32::from_rgb(220, 90, 90)),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
+                }
+            }
             let mut rm_new: Option<usize> = None;
             let mut move_new_request: Option<(usize, usize)> = None;
             for j in 0..self.new_provider.models.len() {
@@ -3025,5 +3334,46 @@ mod compact_tests {
 
         assert!(compact_json(&root).contains("reasoningEffort"));
         assert!(compact_json(&root).contains("\"high\":{\"reasoningEffort\":\"high\"}"));
+    }
+}
+
+#[cfg(test)]
+mod model_fetch_tests {
+    use super::parse_models_response;
+
+    #[test]
+    fn parse_openai_style_models() {
+        let text = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4o-mini","object":"model"}]}"#;
+        let ids = parse_models_response(text).unwrap();
+        assert_eq!(ids, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn parse_anthropic_style_models() {
+        let text = r#"{"data":[{"type":"model","id":"claude-3-7-sonnet-20250219"},{"type":"model","id":"claude-sonnet-4-20250514"}]}"#;
+        let ids = parse_models_response(text).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"claude-sonnet-4-20250514".to_string()));
+    }
+
+    #[test]
+    fn parse_gemini_style_models() {
+        let text = r#"{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-2.5-pro"}]}"#;
+        let ids = parse_models_response(text).unwrap();
+        assert_eq!(ids, vec!["gemini-2.0-flash", "gemini-2.5-pro"]);
+    }
+
+    #[test]
+    fn parse_error_message() {
+        let text = r#"{"error":{"message":"Invalid API key"}}"#;
+        let err = parse_models_response(text).unwrap_err();
+        assert!(err.contains("Invalid API key"));
+    }
+
+    #[test]
+    fn parse_dedupes_ids_and_ignores_missing() {
+        let text = r#"{"data":[{"id":"a"},{"id":"a"},{"name":"b"},{"foo":"c"}]}"#;
+        let ids = parse_models_response(text).unwrap();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 }
