@@ -382,6 +382,8 @@ pub struct ProviderRow {
     pub original_dsh_retry_mode: String,
     pub original_dsh_max_retries: String,
     pub timeout: String,
+    /// 加载时的 timeout（含缺省默认化），用于区分“未动过”与“用户修改”。
+    pub original_timeout: String,
     pub compat: bool,
     pub models: Vec<ModelRow>,
     pub new_model: ModelRow,
@@ -425,7 +427,22 @@ impl ProviderRow {
             original_dsh_timeout_ms: String::new(),
             original_dsh_retry_mode: "normal".into(),
             original_dsh_max_retries: String::new(),
-            timeout: nested_num(v, &["options", "timeout"]),
+            timeout: {
+                let t = nested_num(v, &["options", "timeout"]);
+                if t.is_empty() {
+                    "180000".to_string()
+                } else {
+                    t
+                }
+            },
+            original_timeout: {
+                let t = nested_num(v, &["options", "timeout"]);
+                if t.is_empty() {
+                    "180000".to_string()
+                } else {
+                    t
+                }
+            },
             compat,
             models,
             new_model: ModelRow::new(),
@@ -453,6 +470,7 @@ impl ProviderRow {
             original_dsh_retry_mode: "normal".into(),
             original_dsh_max_retries: String::new(),
             timeout: String::new(),
+            original_timeout: String::new(),
             compat: true,
             models: Vec::new(),
             new_model: ModelRow::new(),
@@ -485,8 +503,7 @@ impl ProviderRow {
             || changed_nested_str(&self.raw, &["options", "baseURL"], &self.base_url);
         let key_changed =
             convert_dialect || changed_nested_str(&self.raw, &["options", "apiKey"], &self.api_key);
-        let timeout_changed = convert_dialect
-            || changed_nested_num(&self.raw, &["options", "timeout"], &self.timeout);
+        let timeout_changed = convert_dialect || self.timeout != self.original_timeout;
         if base_changed || key_changed || timeout_changed {
             let mut options = m
                 .get("options")

@@ -64,10 +64,6 @@ agent-default-model:
     assert_eq!(load.providers[0].dsh_retry_mode, "normal");
     assert_eq!(load.providers[0].dsh_max_retries, "3");
     assert_eq!(load.providers[0].models[0].variants, "medium");
-    assert_eq!(
-        load.default_model,
-        Some(("demo".to_string(), "demo-model".to_string(), "".to_string()))
-    );
     assert_eq!(load.root["ui-theme"]["name"], "dark");
     assert_eq!(load.providers[0].raw["customProviderField"], "keep-me");
 
@@ -216,51 +212,35 @@ fn dsh_native_model_without_optional_fields_stays_without_them() {
 }
 
 #[test]
-fn dsh_default_model_update_keeps_root_key_position() {
-    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
-    let extras = json!({
-        "before": true,
-        "agent-default-model": {"provider": "old", "model": "old-model"},
-        "llm-pi-ai": {"providers": {}},
-        "after": true
-    });
-    let selected = (
-        "demo".to_string(),
-        "demo-model".to_string(),
-        "max".to_string(),
-    );
-    let root = backend.serialize_root_with_default(&[], &[], &extras, None, Some(&Some(selected)));
-    let keys: Vec<&str> = root
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        keys,
-        vec!["before", "agent-default-model", "llm-pi-ai", "after"]
-    );
-}
-
-#[test]
-fn dsh_default_model_is_serialized_only_when_explicitly_changed() {
+fn dsh_agent_default_model_preserved_as_unknown_field() {
     let backend = backends::backend(ConfigFormat::DeepSeekHarness);
     let extras = json!({
         "ui-theme": {"name": "dark"},
-        "agent-default-model": {"provider": "old", "model": "old-model"}
+        "agent-default-model": {"provider": "old", "model": "old-model"},
+        "llm-pi-ai": {"providers": {}}
     });
-    let providers = vec![];
-    let unchanged = backend.serialize_root_with_default(&[], &providers, &extras, None, None);
-    assert_eq!(unchanged["agent-default-model"]["provider"], "old");
+    let root = backend.serialize_root(&[], &[], &extras, None);
+    assert_eq!(root["agent-default-model"]["provider"], "old");
+    assert_eq!(root["agent-default-model"]["model"], "old-model");
+    assert_eq!(root["ui-theme"]["name"], "dark");
+}
 
-    let selected = (
-        "demo".to_string(),
-        "demo-model".to_string(),
-        "max".to_string(),
-    );
-    let changed =
-        backend.serialize_root_with_default(&[], &providers, &extras, None, Some(&Some(selected)));
-    assert_eq!(changed["agent-default-model"]["provider"], "demo");
-    assert_eq!(changed["agent-default-model"]["reasoningEffort"], "max");
-    assert_eq!(changed["ui-theme"]["name"], "dark");
+#[test]
+fn dsh_missing_timeout_defaults_to_180000_without_writeback() {
+    let settings = temp_path("no_timeout.yaml");
+    std::fs::write(
+        &settings,
+        "ui-theme:\n  name: dark\nllm-pi-ai:\n  providers:\n    demo:\n      api: openai-completions\n",
+    )
+    .unwrap();
+    let load = backends::load_backend(ConfigFormat::DeepSeekHarness, settings.to_str().unwrap())
+        .expect("DSH 配置应可加载");
+    // 配置没有 timeoutMs 时默认显示 180000ms
+    assert_eq!(load.providers[0].dsh_timeout_ms, "180000");
+    // 未修改时保存不应写回 timeoutMs
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let root = backend.serialize_root(&[], &load.providers, &load.root, None);
+    let demo = &root["llm-pi-ai"]["providers"]["demo"];
+    assert!(demo.get("timeoutMs").is_none());
+    assert!(demo.get("retryPolicy").is_none());
 }

@@ -1,7 +1,7 @@
 //! DeepSeek Harness（DSH）后端：`~/.dsh/settings.yaml`。
 //!
-//! 只管理 `llm-pi-ai.providers` 及 `agent-default-model`，其他 loader 配置
-//! （如 ui、conversation、插件设置）一律以 raw 为基底原样保留。
+//! 只管理 `llm-pi-ai.providers`，其他顶层配置（ui、conversation、
+//! agent-default-model、插件设置等）一律以 raw 为基底原样保留。
 
 use super::{Backend, BackendLoad};
 use crate::convert;
@@ -198,6 +198,15 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| credentials::default_env_name(key));
+    // 配置文件没有 timeoutMs 时默认显示 180000ms（保存时未修改则不写回）。
+    let timeout_text = {
+        let t = crate::util::num_at(v, "timeoutMs");
+        if t.is_empty() {
+            "180000".to_string()
+        } else {
+            t
+        }
+    };
     ProviderRow {
         key: key.to_string(),
         description: String::new(),
@@ -211,7 +220,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         original_api_key_env: env.clone(),
         api_key_secret: credentials::secret_for(credentials_root, &env),
         original_api_key_secret: credentials::secret_for(credentials_root, &env),
-        dsh_timeout_ms: crate::util::num_at(v, "timeoutMs"),
+        dsh_timeout_ms: timeout_text.clone(),
         dsh_retry_mode: v
             .get("retryPolicy")
             .and_then(|value| value.get("mode"))
@@ -223,7 +232,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             .and_then(|value| value.get("maxRetries"))
             .map(crate::util::number_text_public)
             .unwrap_or_default(),
-        original_dsh_timeout_ms: crate::util::num_at(v, "timeoutMs"),
+        original_dsh_timeout_ms: timeout_text,
         original_dsh_retry_mode: v
             .get("retryPolicy")
             .and_then(|value| value.get("mode"))
@@ -236,6 +245,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             .map(crate::util::number_text_public)
             .unwrap_or_default(),
         timeout: String::new(),
+        original_timeout: String::new(),
         compat: true,
         models,
         new_model: ModelRow::new(),
@@ -568,25 +578,11 @@ impl Backend for DeepSeekHarnessBackend {
                     .collect()
             })
             .unwrap_or_default();
-        let default_model = root
-            .get("agent-default-model")
-            .and_then(Value::as_object)
-            .and_then(|m| {
-                Some((
-                    m.get("provider")?.as_str()?.to_string(),
-                    m.get("model")?.as_str()?.to_string(),
-                    m.get("reasoningEffort")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                ))
-            });
         Ok(BackendLoad {
             root: root.clone(),
             agents: Vec::new(),
             providers,
             extras: root,
-            default_model,
         })
     }
     fn serialize_root(
@@ -617,43 +613,6 @@ impl Backend for DeepSeekHarnessBackend {
             root.insert("llm-pi-ai".into(), Value::Object(llm));
         }
         Value::Object(root)
-    }
-    fn serialize_root_with_default(
-        &self,
-        agents: &[AgentRow],
-        providers: &[ProviderRow],
-        extras: &Value,
-        target_root: Option<&Value>,
-        default_model: Option<&Option<(String, String, String)>>,
-    ) -> Value {
-        let mut root = self.serialize_root(agents, providers, extras, target_root);
-        if let Some(default_model) = default_model {
-            if let Some(object) = root.as_object_mut() {
-                match default_model {
-                    Some((provider, model, effort)) => {
-                        // 直接修改原对象中的值，不 remove + insert；后者会把
-                        // agent-default-model 移到 YAML 根节点末尾。
-                        let default = object
-                            .entry("agent-default-model")
-                            .or_insert_with(|| Value::Object(Map::new()));
-                        let Some(default) = default.as_object_mut() else {
-                            return root;
-                        };
-                        default.insert("provider".into(), Value::String(provider.clone()));
-                        default.insert("model".into(), Value::String(model.clone()));
-                        if effort.trim().is_empty() {
-                            default.remove("reasoningEffort");
-                        } else {
-                            default.insert("reasoningEffort".into(), Value::String(effort.clone()));
-                        }
-                    }
-                    None => {
-                        object.remove("agent-default-model");
-                    }
-                }
-            }
-        }
-        root
     }
 
     fn load_target_root(&self, path: &str) -> Value {

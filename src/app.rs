@@ -165,9 +165,6 @@ pub struct App {
     show_providers_section: bool,
     load_error: Option<String>,
     pi_extras: Value,
-    /// DSH settings.yaml 中的 agent-default-model。
-    dsh_default_model: Option<(String, String, String)>,
-    dsh_default_model_dirty: bool,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
     backend_icons: Vec<Option<egui::TextureHandle>>,
 }
@@ -212,8 +209,6 @@ impl Default for App {
             show_providers_section: true,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
-            dsh_default_model: None,
-            dsh_default_model_dirty: false,
             backend_icons: Vec::new(),
         };
         app.apply_load();
@@ -268,10 +263,6 @@ impl eframe::App for App {
                         ui.add_space(8.0);
                     }
                     self.ui_providers_section(ui);
-                    if self.current_page == ConfigFormat::DeepSeekHarness {
-                        ui.add_space(8.0);
-                        self.ui_dsh_default_model(ui);
-                    }
                     ui.add_space(8.0);
                 });
         });
@@ -316,8 +307,6 @@ impl App {
                 self.agents = load.agents;
                 self.providers = load.providers;
                 self.pi_extras = load.extras;
-                self.dsh_default_model = load.default_model;
-                self.dsh_default_model_dirty = false;
                 self.status = format!(
                     "已加载 ({}): {} agents, {} providers",
                     self.source_format.label(),
@@ -330,8 +319,6 @@ impl App {
                 self.agents = Vec::new();
                 self.providers = Vec::new();
                 self.pi_extras = Value::Object(Map::new());
-                self.dsh_default_model = None;
-                self.dsh_default_model_dirty = false;
                 self.status = format!("加载失败: {}", e);
             }
         }
@@ -917,49 +904,6 @@ impl App {
         });
     }
 
-    fn ui_dsh_default_model(&mut self, ui: &mut egui::Ui) {
-        ui.group(|ui| {
-            ui.strong("agent-default-model");
-            let (mut provider, mut model, mut effort) =
-                self.dsh_default_model.clone().unwrap_or_default();
-            let provider_changed = ui
-                .horizontal(|ui| {
-                    ui.label("provider");
-                    ui.text_edit_singleline(&mut provider)
-                })
-                .inner
-                .changed();
-            let model_changed = ui
-                .horizontal(|ui| {
-                    ui.label("model");
-                    ui.text_edit_singleline(&mut model)
-                })
-                .inner
-                .changed();
-            let effort_changed = ui
-                .horizontal(|ui| {
-                    ui.label("reasoningEffort");
-                    ui.text_edit_singleline(&mut effort)
-                })
-                .inner
-                .changed();
-            if provider_changed || model_changed || effort_changed {
-                self.dsh_default_model_dirty = true;
-                self.dsh_default_model = if provider.trim().is_empty()
-                    && model.trim().is_empty()
-                    && effort.trim().is_empty()
-                {
-                    None
-                } else {
-                    Some((provider, model, effort))
-                };
-            }
-            if self.dsh_default_model.is_none() {
-                ui.label(egui::RichText::new("留空表示保留/删除默认模型配置").weak());
-            }
-        });
-    }
-
     /// 当前 agent 文件是否使用某个 provider 级字段。
     /// 判断范围是整个文件，不是单个 provider；切换到尚未加载的目标页时
     /// 使用完整 schema，保证新增 provider 可以输入所有专属字段。
@@ -1484,12 +1428,12 @@ impl App {
                 egui::Label::new(egui::RichText::new(api_key_label).weak()),
             );
             if show_dsh {
-                ui.add(egui::TextEdit::singleline(&mut p.api_key_env).desired_width(240.0));
+                ui.add(egui::TextEdit::singleline(&mut p.api_key_env).desired_width(192.0));
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("API Key").weak()),
                 );
-                ui.add(egui::TextEdit::singleline(&mut p.api_key_secret).desired_width(240.0));
+                ui.add(egui::TextEdit::singleline(&mut p.api_key_secret).desired_width(408.0));
             } else {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
             }
@@ -1528,8 +1472,7 @@ impl App {
             };
             let fetch_secret = credentials::effective_secret(p);
             if ui.button("获取模型").clicked() {
-                fetch_request =
-                    Some((p.key.clone(), p.base_url.clone(), fetch_secret, fetch_api));
+                fetch_request = Some((p.key.clone(), p.base_url.clone(), fetch_secret, fetch_api));
             }
             if self.model_fetch_open.contains(&p.key) && ui.button("关闭").clicked() {
                 close_fetch = true;
@@ -1623,120 +1566,124 @@ impl App {
                     ui.strong(format!("Model {}", j + 1));
                 });
                 ui.horizontal_wrapped(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("id:").weak()),
-                );
-                let id_resp =
-                    ui.add(egui::TextEdit::singleline(&mut p.models[j].id).desired_width(120.0));
-                if !p.models[j].id.trim().is_empty() && other_ids.contains(p.models[j].id.trim()) {
-                    id_resp.on_hover_text("id 与同 provider 内其他模型重复，保存将被阻止");
-                    ui.label(
-                        egui::RichText::new("⚠ 重复")
-                            .small()
-                            .color(egui::Color32::from_rgb(220, 90, 90)),
-                    );
-                }
-                if show_model_name {
                     ui.add_sized(
                         [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("name:").weak()),
+                        egui::Label::new(egui::RichText::new("id:").weak()),
                     );
-                    ui.add(egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0));
-                }
-                if show_model_reasoning && (show_oc || !show_dsh) {
-                    ui.checkbox(&mut p.models[j].reasoning, "reasoning");
-                }
-                if show_model_tool_call && show_oc {
-                    ui.checkbox(&mut p.models[j].tool_call, "tool_call");
-                }
-                if show_model_store && show_oc {
-                    ui.checkbox(&mut p.models[j].store, "store");
-                }
-                if show_model_context {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(context_label).weak()),
-                    );
-                    numeric_text_edit(ui, &mut p.models[j].context, 53.0, "");
-                }
-                if show_model_output {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(output_label).weak()),
-                    );
-                    numeric_text_edit(ui, &mut p.models[j].output, 53.0, "");
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if show_model_input {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(input_label).weak()),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut p.models[j].modalities_input)
-                            .desired_width(80.0),
-                    );
-                }
-                if show_oc {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("modalities.output").weak()),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut p.models[j].modalities_output)
-                            .desired_width(80.0),
-                    );
-                }
-                if show_model_variants {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(variants_label).weak()),
-                    );
-                }
-                let current_variants = p.models[j].variants.clone();
-                let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    current_variants
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                };
-                let display = if selected_variants.is_empty() {
-                    "选择..."
-                } else {
-                    &current_variants
-                };
-                let variant_key = format!("variant_open_{}_{}", p.key, j);
-                let is_open = self.variant_open.contains(&variant_key);
-                if ui.button(display).clicked() {
-                    if is_open {
-                        self.variant_open.remove(&variant_key);
-                    } else {
-                        self.variant_open.insert(variant_key.clone());
+                    let id_resp = ui
+                        .add(egui::TextEdit::singleline(&mut p.models[j].id).desired_width(120.0));
+                    if !p.models[j].id.trim().is_empty()
+                        && other_ids.contains(p.models[j].id.trim())
+                    {
+                        id_resp.on_hover_text("id 与同 provider 内其他模型重复，保存将被阻止");
+                        ui.label(
+                            egui::RichText::new("⚠ 重复")
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 90, 90)),
+                        );
                     }
-                }
-                if is_open {
-                    for vn in variant_names {
-                        let mut checked = selected_variants.contains(&vn.to_string());
-                        if ui.checkbox(&mut checked, *vn).changed() {
-                            if checked {
-                                if !selected_variants.contains(&vn.to_string()) {
-                                    selected_variants.push(vn.to_string());
-                                }
-                            } else {
-                                selected_variants.retain(|s| s != vn);
-                            }
-                            p.models[j].variants = selected_variants.join(", ");
+                    if show_model_name {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new("name:").weak()),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0),
+                        );
+                    }
+                    if show_model_reasoning && (show_oc || !show_dsh) {
+                        ui.checkbox(&mut p.models[j].reasoning, "reasoning");
+                    }
+                    if show_model_tool_call && show_oc {
+                        ui.checkbox(&mut p.models[j].tool_call, "tool_call");
+                    }
+                    if show_model_store && show_oc {
+                        ui.checkbox(&mut p.models[j].store, "store");
+                    }
+                    if show_model_context {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new(context_label).weak()),
+                        );
+                        numeric_text_edit(ui, &mut p.models[j].context, 53.0, "");
+                    }
+                    if show_model_output {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new(output_label).weak()),
+                        );
+                        numeric_text_edit(ui, &mut p.models[j].output, 53.0, "");
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if show_model_input {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new(input_label).weak()),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut p.models[j].modalities_input)
+                                .desired_width(80.0),
+                        );
+                    }
+                    if show_oc {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new("modalities.output").weak()),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut p.models[j].modalities_output)
+                                .desired_width(80.0),
+                        );
+                    }
+                    if show_model_variants {
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new(variants_label).weak()),
+                        );
+                    }
+                    let current_variants = p.models[j].variants.clone();
+                    let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        current_variants
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    };
+                    let display = if selected_variants.is_empty() {
+                        "选择..."
+                    } else {
+                        &current_variants
+                    };
+                    let variant_key = format!("variant_open_{}_{}", p.key, j);
+                    let is_open = self.variant_open.contains(&variant_key);
+                    if ui.button(display).clicked() {
+                        if is_open {
+                            self.variant_open.remove(&variant_key);
+                        } else {
+                            self.variant_open.insert(variant_key.clone());
                         }
                     }
-                }
-                if ui.button("删").clicked() {
-                    rm = Some(j);
-                }
+                    if is_open {
+                        for vn in variant_names {
+                            let mut checked = selected_variants.contains(&vn.to_string());
+                            if ui.checkbox(&mut checked, *vn).changed() {
+                                if checked {
+                                    if !selected_variants.contains(&vn.to_string()) {
+                                        selected_variants.push(vn.to_string());
+                                    }
+                                } else {
+                                    selected_variants.retain(|s| s != vn);
+                                }
+                                p.models[j].variants = selected_variants.join(", ");
+                            }
+                        }
+                    }
+                    if ui.button("删").clicked() {
+                        rm = Some(j);
+                    }
                 });
             });
             if let Some(src) = &self.model_drag_src {
@@ -2045,7 +1992,7 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_provider.api_key_env)
                             .hint_text("DEEPSEEK_API_KEY")
-                            .desired_width(240.0),
+                            .desired_width(192.0),
                     );
                     ui.add_sized(
                         [60.0, 24.0],
@@ -2054,7 +2001,7 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_provider.api_key_secret)
                             .hint_text("实际密钥")
-                            .desired_width(240.0),
+                            .desired_width(408.0),
                     );
                 } else {
                     ui.add(
@@ -2090,11 +2037,8 @@ impl App {
                 };
                 let fetch_secret = credentials::effective_secret(&self.new_provider);
                 if ui.button("获取模型").clicked() {
-                    fetch_request = Some((
-                        self.new_provider.base_url.clone(),
-                        fetch_secret,
-                        fetch_api,
-                    ));
+                    fetch_request =
+                        Some((self.new_provider.base_url.clone(), fetch_secret, fetch_api));
                 }
                 if self.model_fetch_open.contains(NEW_PROVIDER_FETCH_KEY)
                     && ui.button("关闭").clicked()
@@ -2104,7 +2048,8 @@ impl App {
             });
             if let Some((base, secret, api)) = fetch_request {
                 self.start_model_fetch(NEW_PROVIDER_FETCH_KEY, &base, &secret, &api);
-                self.model_fetch_open.insert(NEW_PROVIDER_FETCH_KEY.to_string());
+                self.model_fetch_open
+                    .insert(NEW_PROVIDER_FETCH_KEY.to_string());
             }
             if close_fetch {
                 self.model_fetch_open.remove(NEW_PROVIDER_FETCH_KEY);
@@ -2122,11 +2067,8 @@ impl App {
                                 let ids = models.clone();
                                 ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
                                 for id in ids {
-                                    let mut checked = self
-                                        .new_provider
-                                        .models
-                                        .iter()
-                                        .any(|m| m.id.trim() == id);
+                                    let mut checked =
+                                        self.new_provider.models.iter().any(|m| m.id.trim() == id);
                                     if ui.checkbox(&mut checked, &id).changed() && checked {
                                         let mut row = ModelRow::new();
                                         row.id = id.clone();
@@ -2166,39 +2108,39 @@ impl App {
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("id:").weak()),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_provider.models[j].id)
-                            .desired_width(120.0),
-                    );
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("name:").weak()),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_provider.models[j].name)
-                            .desired_width(120.0),
-                    );
-                    if show_oc || !show_dsh {
-                        ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
-                    }
-                    if show_oc {
-                        ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
-                        ui.checkbox(&mut self.new_provider.models[j].store, "store");
-                    }
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(context_label).weak()),
-                    );
-                    numeric_text_edit(ui, &mut self.new_provider.models[j].context, 53.0, "");
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(output_label).weak()),
-                    );
-                    numeric_text_edit(ui, &mut self.new_provider.models[j].output, 53.0, "");
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new("id:").weak()),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_provider.models[j].id)
+                                .desired_width(120.0),
+                        );
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new("name:").weak()),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_provider.models[j].name)
+                                .desired_width(120.0),
+                        );
+                        if show_oc || !show_dsh {
+                            ui.checkbox(&mut self.new_provider.models[j].reasoning, "reasoning");
+                        }
+                        if show_oc {
+                            ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
+                            ui.checkbox(&mut self.new_provider.models[j].store, "store");
+                        }
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new(context_label).weak()),
+                        );
+                        numeric_text_edit(ui, &mut self.new_provider.models[j].context, 53.0, "");
+                        ui.add_sized(
+                            [60.0, 24.0],
+                            egui::Label::new(egui::RichText::new(output_label).weak()),
+                        );
+                        numeric_text_edit(ui, &mut self.new_provider.models[j].output, 53.0, "");
                     });
                 });
             }
@@ -2646,30 +2588,11 @@ impl App {
         } else {
             Some(backend.load_target_root(path))
         };
-        if fmt == ConfigFormat::DeepSeekHarness {
-            if let Some((provider, model, _effort)) = &self.dsh_default_model {
-                let valid = self.providers.iter().any(|p| {
-                    p.key.trim() == provider.trim()
-                        && p.models.iter().any(|m| m.id.trim() == model.trim())
-                });
-                if !valid {
-                    return Err(format!(
-                        "agent-default-model 引用了不存在的 provider/model: {}/{}",
-                        provider, model
-                    ));
-                }
-            }
-        }
-        let root = backend.serialize_root_with_default(
+        let root = backend.serialize_root(
             &self.agents,
             &self.providers,
             self.extras_for(fmt),
             target_root.as_ref(),
-            if fmt == ConfigFormat::DeepSeekHarness && self.dsh_default_model_dirty {
-                Some(&self.dsh_default_model)
-            } else {
-                None
-            },
         );
         let content = if fmt == ConfigFormat::DeepSeekHarness && is_current {
             // 未发生任何结构化修改时直接保留原始 YAML，避免无意义的
@@ -2718,9 +2641,6 @@ impl App {
         // 当前文件保存成功后，回填 opencode 的 extras 载体（self.root）保持与磁盘一致
         if is_current && fmt == ConfigFormat::Opencode {
             self.root = root;
-        }
-        if is_current && fmt == ConfigFormat::DeepSeekHarness {
-            self.dsh_default_model_dirty = false;
         }
         Ok(())
     }
@@ -3358,7 +3278,8 @@ mod model_fetch_tests {
 
     #[test]
     fn parse_gemini_style_models() {
-        let text = r#"{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-2.5-pro"}]}"#;
+        let text =
+            r#"{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-2.5-pro"}]}"#;
         let ids = parse_models_response(text).unwrap();
         assert_eq!(ids, vec!["gemini-2.0-flash", "gemini-2.5-pro"]);
     }

@@ -243,6 +243,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         original_dsh_retry_mode: "normal".into(),
         original_dsh_max_retries: String::new(),
         timeout: String::new(),
+        original_timeout: String::new(),
         compat,
         models,
         new_model: ModelRow::new(),

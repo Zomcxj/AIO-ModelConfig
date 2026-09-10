@@ -34,8 +34,6 @@ pub struct BackendLoad {
     /// 本后端顶层未知字段：opencode 为整个 root（agent/provider 会被整体替换），
     /// pi 系为 `providers` 之外的顶层字段；DSH 为完整 root。
     pub extras: Value,
-    /// DSH 的默认模型引用及默认思考档位。
-    pub default_model: Option<(String, String, String)>,
 }
 
 /// 配置后端：一种 agent 配置格式的加载 / 保存 / 判别 / 路径知识。
@@ -77,43 +75,6 @@ pub trait Backend: Sync {
         extras: &Value,
         target_root: Option<&Value>,
     ) -> Value;
-
-    /// 构造保存 root，并可更新 DSH 等后端的专用默认模型字段。
-    fn serialize_root_with_default(
-        &self,
-        agents: &[AgentRow],
-        providers: &[ProviderRow],
-        extras: &Value,
-        target_root: Option<&Value>,
-        default_model: Option<&Option<(String, String, String)>>,
-    ) -> Value {
-        let mut root = self.serialize_root(agents, providers, extras, target_root);
-        if let Some(default_model) = default_model {
-            if let Some(object) = root.as_object_mut() {
-                match default_model {
-                    Some((provider, model, effort)) => {
-                        let mut default = object
-                            .get("agent-default-model")
-                            .and_then(Value::as_object)
-                            .cloned()
-                            .unwrap_or_default();
-                        default.insert("provider".into(), Value::String(provider.clone()));
-                        default.insert("model".into(), Value::String(model.clone()));
-                        if effort.trim().is_empty() {
-                            default.remove("reasoningEffort");
-                        } else {
-                            default.insert("reasoningEffort".into(), Value::String(effort.clone()));
-                        }
-                        object.insert("agent-default-model".into(), Value::Object(default));
-                    }
-                    None => {
-                        object.remove("agent-default-model");
-                    }
-                }
-            }
-        }
-        root
-    }
 
     /// 跨格式目标保存时读取目标现有 root（容错：读不到返回空对象）。
     fn load_target_root(&self, path: &str) -> Value;

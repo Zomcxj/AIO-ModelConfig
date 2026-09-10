@@ -1,6 +1,6 @@
 # ModelHarbor 技术细节
 
-本文为 [README](../README.md) 的详细补充：技术栈、构建细节、三格式字段对照、分页方言表单、oh-my-pi 注意事项与平台安全说明。
+本文为 [README](../README.md) 的详细补充：技术栈、构建细节、四格式字段对照、分页方言表单、DeepSeek Harness 配置说明、oh-my-pi 注意事项与平台安全说明。
 
 ## 技术栈
 
@@ -9,6 +9,7 @@
 - [serde_json](https://github.com/serde-rs/json)（`preserve_order` 保留字段顺序）
 - [serde_yaml_ng](https://github.com/nbatchelor/serde_yaml_ng)（oh-my-pi YAML 序列化）
 - [rfd](https://github.com/PolyMeilex/rfd)（文件对话框）
+- [ureq](https://github.com/algesten/ureq)（“获取模型”的 HTTP 客户端，rustls TLS，后台线程执行不阻塞 UI）
 - [winres](https://github.com/shadows-withal/winres)（Windows 图标打包）
 - [windows-sys](https://github.com/microsoft/windows-rs)（自定义光标）
 
@@ -38,11 +39,21 @@ cargo build --release
 
 ## 分页方言表单
 
-顶栏三个 agent 图标标签（opencode / oh-my-pi / pi-agent）点击切换；加载任意一份配置后三个页面共享同一份数据，修改 provider 参数在所有页面同步生效；Agents 区块仅属于 opencode 页面；各页表单按自身方言显示字段与枚举（无对应字段不显示占位）：
+顶栏四个 agent 图标标签（opencode / DeepSeek Harness / oh-my-pi / pi-agent）点击切换；加载任意一份配置后四个页面共享同一份数据，修改 provider 参数在所有页面同步生效（provider/model 顺序亦跨页同步）；Agents 区块仅属于 opencode 页面；各页表单按自身方言显示字段与枚举（无对应字段不显示占位）：
 
 - **opencode 页**：`options.baseURL` / `options.timeout` / `npm` 下拉 / `limit.context` / `modalities` / `variants`（none…ultra）
 - **pi-agent 页**：`baseUrl` / `apiKey` / `api` 下拉（pi KnownApi 10 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinkingLevelMap`（off/minimal…max）
 - **oh-my-pi 页**：`baseUrl` / `apiKey` / `api` 下拉（omp 官方 9 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinking.efforts`（minimal…max）
+- **DeepSeek Harness 页**：`baseURL` / `apiKeyEnv` + 实际密钥（存同级 `.credentials.yaml`）/ `api` 下拉 / `timeoutMs` / `retryPolicy.mode` / `retryPolicy.maxRetries` / `models`（`id` / `name` / `contextWindow` / `maxTokens` / `input` / `reasoningEfforts`）
+
+**获取模型**：每个 provider 卡片与“新增 Provider”弹窗的 Models 标题右侧都有“获取模型”按钮。点击后按 provider 的 api 类型请求模型列表接口并弹层展示：
+
+- 地址：`{baseURL}/models`；`anthropic-messages` 固定使用 `/v1/models`（`baseURL` 已去 `/v1` 时自动补回）
+- 鉴权：`anthropic-messages` 用 `x-api-key` + `anthropic-version`，其余用 `Authorization: Bearer`
+- 解析兼容 `data` / `models` / 裸数组三种响应格式（含 Gemini 式 `name: models/...` 前缀清理与去重）
+- 已配置的模型自动打勾；勾选未配置的模型即新增一行 `ModelRow`；取消勾选不删除既有配置，避免误伤已填写的模型参数
+
+**缺省默认值**：配置文件未写 `timeout` 时，opencode 的 `options.timeout` 与 DSH 的 `timeoutMs` 均默认显示 `180000`（ms）；未修改时保存不写回，避免污染配置。DSH 的 `retryPolicy.mode` 缺省显示 `normal`。
 
 保存语义：当前文件属于本页格式且已加载时写当前文件（整体替换）；手动修改了路径但未点“加载”时，仍写该路径但自动切换为“先读后合并”，不会破坏目标文件已有配置；其余情况写该后端默认目标（本地优先、WSL 回落）。跨格式写入采用“先读后合并”，仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留；保存时不产生空对象污染（空列表、空 `limit`/`options` 省略不写）。
 
@@ -182,10 +193,54 @@ providers:
 - YAML 注释与文件风格：serde 序列化不保留注释（保存后注释丢失），输出为标准块风格；
 - 根目录仅 `providers` 键有效，其余顶层字段原样保留。
 
+### DeepSeek Harness（DSH）
+
+工具读取 / 写入 `~/.dsh/settings.yaml`，只管理 `llm-pi-ai.providers`；其余顶层配置（`ui`、`conversation`、`agent-default-model`、插件设置等）一律原样保留。核心结构示例如下：
+
+```yaml
+ui-theme:
+  name: dark
+agent-default-model:
+  provider: sensenova
+  model: deepseek-v4-flash
+  reasoningEffort: max
+llm-pi-ai:
+  providers:
+    sensenova:
+      apiKeyEnv: SENSENOVA_API_KEY   # 凭据引用名，存于主配置
+      api: openai-completions
+      baseURL: https://api.sensenova.cn/v1
+      timeoutMs: 180000
+      retryPolicy:
+        mode: normal
+        maxRetries: 3
+      models:
+        - id: deepseek-v4-flash
+          name: DeepSeek V4 Flash
+          contextWindow: 131072
+          maxTokens: 8192
+          input: [text]
+          reasoningEfforts:
+            medium: medium
+```
+
+**凭据分离**：`settings.yaml` 只保存 `apiKeyEnv`（引用名），实际密钥保存在同级 `.credentials.yaml` 的 `refs` 下（`refs: { SENSENOVA_API_KEY: sk-... }`）：
+
+- 加载 DSH 配置时自动查找同级凭据文件并读取密钥；找不到时密钥为空
+- 密钥在 DSH 页与 opencode / pi-agent / oh-my-pi 页面间同步显示与编辑；保存 DSH 时写回 `.credentials.yaml`（重命名 `apiKeyEnv` 会清理旧 ref，清空密钥默认不删除旧 ref，避免误伤其他配置）
+- 凭据文件中的未知 ref、`records` 等其他字段原样保留
+
+**DSH 注意事项：**
+
+- `baseURL` 仅在 `api = anthropic-messages` 时去掉末尾 `/v1`（Anthropic 官方域名为根地址），`openai-completions` 等其他 api 必须保留 `/v1`；页面显示与保存均按此规则
+- 默认参数：无 `timeoutMs` 时显示 `180000`，无 `retryPolicy.mode` 时显示 `normal`，未修改不写回
+- provider / model 只保存各自支持的字段，opencode 等方言字段不会泄漏进 DSH
+- 保存以 raw 为基底：未知字段、其他 provider、其他凭据 ref、`records` 及 DSH 顶层未管理字段全部保留；未做任何修改时保留原始 YAML 文本
+
 ## 平台与安全说明
 
 - 本工具当前**仅支持 Windows**（依赖 Win32 光标子系统、微软雅黑字体路径与 `wsl` 命令）。
-- 配置文件中的 `apiKey` 以**明文**读取与写回（与 opencode / pi-agent 本身的存储方式一致），请勿将配置文件提交到公开仓库。
+- 配置文件中的 `apiKey` 以**明文**读取与写回（与 opencode / pi-agent 本身的存储方式一致），请勿将配置文件提交到公开仓库；DSH 的实际密钥存放于同级 `.credentials.yaml`，同样为明文，请勿提交。
 - 保存到 opencode / pi-agent 目标时采用“先读后合并”策略：仅更新 `agent`/`provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留。
 - 本地与 WSL 同时存在同名配置时，保存目标**优先本地路径**，仅本地不存在时回落 WSL。
 - 涉及 WSL 的探测均通过 `wsl` 命令完成，Windows 下统一附加 `CREATE_NO_WINDOW`，不会闪现终端窗口；探测结果进程级缓存（一次批量调用探测全部后端，避免重复拉起 `wsl` 进程阻塞 UI）。

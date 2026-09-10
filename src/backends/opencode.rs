@@ -70,7 +70,6 @@ impl Backend for OpenCodeBackend {
             providers,
             // opencode 的 extras 载体就是整个 root（agent/provider 保存时整体替换）
             extras: v,
-            default_model: None,
         })
     }
 

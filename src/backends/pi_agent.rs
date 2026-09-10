@@ -69,7 +69,6 @@ impl Backend for PiAgentBackend {
             agents: Vec::new(),
             providers,
             extras,
-            default_model: None,
         })
     }
 

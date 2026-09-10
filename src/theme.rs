@@ -49,7 +49,7 @@ impl Theme {
         style.spacing.scroll.bar_outer_margin = 0.0;
         style.spacing.scroll.floating = true;
         style.visuals = self.palette().into_visuals();
-        let r = 15u8;
+        let r = 10u8;
         for w in [
             &mut style.visuals.widgets.noninteractive,
             &mut style.visuals.widgets.inactive,
