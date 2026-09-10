@@ -188,7 +188,9 @@ impl eframe::App for App {
         });
         self.paint_drag_ghost(ctx);
         // 仅拖拽中显示抓取光标（避免任意控件按下时全局变光标）
-        let dragging = self.agent_drag_src.is_some() || self.provider_drag_src.is_some();
+        let dragging = self.agent_drag_src.is_some()
+            || self.provider_drag_src.is_some()
+            || self.model_drag_src.is_some();
         #[cfg(target_os = "windows")]
         crate::cursor::set_custom_cursor_active(dragging);
     }
@@ -267,7 +269,13 @@ impl App {
                         ),
                         None => egui::Button::new(id.label()),
                     };
-                    if ui.add(btn.selected(self.current_page == id)).clicked() {
+                    let is_selected = self.current_page == id;
+                    let btn = if is_selected {
+                        btn.fill(ui.visuals().selection.bg_fill)
+                    } else {
+                        btn
+                    };
+                    if ui.add(btn).clicked() {
                         if id == ConfigFormat::DeepSeekHarness
                             && self.current_page != ConfigFormat::DeepSeekHarness
                         {
@@ -1343,7 +1351,17 @@ impl App {
         ui.add_space(2.0);
         ui.strong("Models");
         let mut rm: Option<usize> = None;
+        let mut model_hover_target: Option<String> = None;
+        let mut model_drag_stopped = false;
         for j in 0..p.models.len() {
+            let model_key = format!("{}\u{1f}{}", p.key, p.models[j].id);
+            let model_highlight = if self.model_drag_target.as_deref() == Some(model_key.as_str()) {
+                2
+            } else if self.model_drag_src.as_deref() == Some(model_key.as_str()) {
+                1
+            } else {
+                0
+            };
             let other_ids: HashSet<String> = p
                 .models
                 .iter()
@@ -1351,7 +1369,19 @@ impl App {
                 .filter(|(j2, _)| *j2 != j)
                 .map(|(_, m)| m.id.trim().to_string())
                 .collect();
-            ui.horizontal_wrapped(|ui| {
+            let model_response = card_frame(ui, true, model_highlight, |ui| {
+                ui.horizontal(|ui| {
+                    let handle = ui.add(DragHandle);
+                    if handle.drag_started() {
+                        self.model_drag_src = Some(model_key.clone());
+                        self.model_drag_target = None;
+                    }
+                    if handle.drag_stopped() {
+                        model_drag_stopped = true;
+                    }
+                    ui.strong(format!("Model {}", j + 1));
+                });
+                ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new("id:").weak()),
@@ -1466,7 +1496,39 @@ impl App {
                 if ui.button("删").clicked() {
                     rm = Some(j);
                 }
+                });
             });
+            if let Some(src) = &self.model_drag_src {
+                if src != &model_key
+                    && model_response.contains_pointer()
+                    && model_hover_target.is_none()
+                {
+                    model_hover_target = Some(model_key.clone());
+                }
+            }
+        }
+        if self.model_drag_src.is_some() {
+            self.model_drag_target = model_hover_target;
+        } else {
+            self.model_drag_target = None;
+        }
+        if model_drag_stopped {
+            if let Some(src) = self.model_drag_src.take() {
+                let target = self.model_drag_target.take();
+                if let Some(dst) = target {
+                    let source = p
+                        .models
+                        .iter()
+                        .position(|m| format!("{}\u{1f}{}", p.key, m.id) == src);
+                    let destination = p
+                        .models
+                        .iter()
+                        .position(|m| format!("{}\u{1f}{}", p.key, m.id) == dst);
+                    if let (Some(source), Some(destination)) = (source, destination) {
+                        move_item(&mut p.models, source, destination);
+                    }
+                }
+            }
         }
         if let Some(j) = rm {
             p.models.remove(j);
@@ -1778,8 +1840,23 @@ impl App {
             ui.add_space(2.0);
             ui.strong("Models");
             let mut rm_new: Option<usize> = None;
+            let mut move_new_request: Option<(usize, usize)> = None;
             for j in 0..self.new_provider.models.len() {
-                ui.horizontal_wrapped(|ui| {
+                let model_count = self.new_provider.models.len();
+                card_frame(ui, true, 0, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("Model {}", j + 1));
+                        if j > 0 && ui.button("↑").clicked() {
+                            move_new_request = Some((j, j - 1));
+                        }
+                        if j + 1 < model_count && ui.button("↓").clicked() {
+                            move_new_request = Some((j, j + 1));
+                        }
+                        if ui.button("删").clicked() {
+                            rm_new = Some(j);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
                     ui.add_sized(
                         [60.0, 24.0],
                         egui::Label::new(egui::RichText::new("id:").weak()),
@@ -1813,10 +1890,11 @@ impl App {
                         egui::Label::new(egui::RichText::new(output_label).weak()),
                     );
                     numeric_text_edit(ui, &mut self.new_provider.models[j].output, 53.0, "");
-                    if ui.button("删").clicked() {
-                        rm_new = Some(j);
-                    }
+                    });
                 });
+            }
+            if let Some((from, to)) = move_new_request {
+                move_item(&mut self.new_provider.models, from, to);
             }
             if let Some(j) = rm_new {
                 self.new_provider.models.remove(j);
@@ -1997,6 +2075,10 @@ impl App {
                 .find(|p| &p.key == k)
                 .map(|p| p.key.as_str())
                 .unwrap_or("")
+        } else if let Some(k) = &self.model_drag_src {
+            k.split_once('\u{1f}')
+                .map(|(_, model)| model)
+                .unwrap_or(k.as_str())
         } else {
             return;
         };
