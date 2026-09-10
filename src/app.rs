@@ -63,6 +63,8 @@ pub struct App {
     agent_drag_target: Option<String>,
     provider_drag_src: Option<String>,
     provider_drag_target: Option<String>,
+    model_drag_src: Option<String>,
+    model_drag_target: Option<String>,
     theme: Theme,
     save_format: SaveFormat,
     /// 滚轮切换保存格式的门门：一次连续滚动手势只切换一次。
@@ -78,7 +80,7 @@ pub struct App {
     load_error: Option<String>,
     pi_extras: Value,
     /// DSH settings.yaml 中的 agent-default-model。
-    dsh_default_model: Option<(String, String)>,
+    dsh_default_model: Option<(String, String, String)>,
     dsh_default_model_dirty: bool,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
     backend_icons: Vec<Option<egui::TextureHandle>>,
@@ -107,6 +109,8 @@ impl Default for App {
             agent_drag_target: None,
             provider_drag_src: None,
             provider_drag_target: None,
+            model_drag_src: None,
+            model_drag_target: None,
             theme: Theme::default(),
             save_format: SaveFormat::default(),
             save_format_wheel_latch: false,
@@ -815,7 +819,8 @@ impl App {
     fn ui_dsh_default_model(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.strong("agent-default-model");
-            let (mut provider, mut model) = self.dsh_default_model.clone().unwrap_or_default();
+            let (mut provider, mut model, mut effort) =
+                self.dsh_default_model.clone().unwrap_or_default();
             let provider_changed = ui
                 .horizontal(|ui| {
                     ui.label("provider");
@@ -830,12 +835,22 @@ impl App {
                 })
                 .inner
                 .changed();
-            if provider_changed || model_changed {
+            let effort_changed = ui
+                .horizontal(|ui| {
+                    ui.label("reasoningEffort");
+                    ui.text_edit_singleline(&mut effort)
+                })
+                .inner
+                .changed();
+            if provider_changed || model_changed || effort_changed {
                 self.dsh_default_model_dirty = true;
-                self.dsh_default_model = if provider.trim().is_empty() && model.trim().is_empty() {
+                self.dsh_default_model = if provider.trim().is_empty()
+                    && model.trim().is_empty()
+                    && effort.trim().is_empty()
+                {
                     None
                 } else {
-                    Some((provider, model))
+                    Some((provider, model, effort))
                 };
             }
             if self.dsh_default_model.is_none() {
@@ -851,21 +866,31 @@ impl App {
         if self.source_format != self.current_page {
             return true;
         }
-        self.providers.iter().any(|provider| match self.current_page {
-            ConfigFormat::Opencode => match field {
-                "base_url" => provider.raw.get("options").and_then(|v| v.get("baseURL")).is_some(),
-                "timeout" => provider.raw.get("options").and_then(|v| v.get("timeout")).is_some(),
-                _ => false,
-            },
-            ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
-                "base_url" => provider.raw.get("baseUrl").is_some(),
-                _ => false,
-            },
-            ConfigFormat::DeepSeekHarness => match field {
-                "base_url" => provider.raw.get("baseURL").is_some(),
-                _ => false,
-            },
-        })
+        self.providers
+            .iter()
+            .any(|provider| match self.current_page {
+                ConfigFormat::Opencode => match field {
+                    "base_url" => provider
+                        .raw
+                        .get("options")
+                        .and_then(|v| v.get("baseURL"))
+                        .is_some(),
+                    "timeout" => provider
+                        .raw
+                        .get("options")
+                        .and_then(|v| v.get("timeout"))
+                        .is_some(),
+                    _ => false,
+                },
+                ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
+                    "base_url" => provider.raw.get("baseUrl").is_some(),
+                    _ => false,
+                },
+                ConfigFormat::DeepSeekHarness => match field {
+                    "base_url" => provider.raw.get("baseURL").is_some(),
+                    _ => false,
+                },
+            })
     }
 
     /// 当前 agent 文件是否使用某个 model 级字段。字段存在性按整个
@@ -880,10 +905,26 @@ impl App {
                     "name" => model.raw.get("name").is_some(),
                     "reasoning" => model.raw.get("reasoning").is_some(),
                     "tool_call" => model.raw.get("tool_call").is_some(),
-                    "store" => model.raw.get("options").and_then(|v| v.get("store")).is_some(),
-                    "context" => model.raw.get("limit").and_then(|v| v.get("context")).is_some(),
-                    "output" => model.raw.get("limit").and_then(|v| v.get("output")).is_some(),
-                    "input" => model.raw.get("modalities").and_then(|v| v.get("input")).is_some(),
+                    "store" => model
+                        .raw
+                        .get("options")
+                        .and_then(|v| v.get("store"))
+                        .is_some(),
+                    "context" => model
+                        .raw
+                        .get("limit")
+                        .and_then(|v| v.get("context"))
+                        .is_some(),
+                    "output" => model
+                        .raw
+                        .get("limit")
+                        .and_then(|v| v.get("output"))
+                        .is_some(),
+                    "input" => model
+                        .raw
+                        .get("modalities")
+                        .and_then(|v| v.get("input"))
+                        .is_some(),
                     "variants" => model.raw.get("variants").is_some(),
                     _ => false,
                 },
@@ -893,8 +934,10 @@ impl App {
                     "context" => model.raw.get("contextWindow").is_some(),
                     "output" => model.raw.get("maxTokens").is_some(),
                     "input" => model.raw.get("input").is_some(),
-                    "variants" => model.raw.get("thinkingLevelMap").is_some()
-                        || model.raw.get("thinking").is_some(),
+                    "variants" => {
+                        model.raw.get("thinkingLevelMap").is_some()
+                            || model.raw.get("thinking").is_some()
+                    }
                     _ => false,
                 },
                 ConfigFormat::DeepSeekHarness => match field {
@@ -1109,6 +1152,7 @@ impl App {
         let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
         let show_provider_base_url = self.page_has_provider_field("base_url");
         let show_provider_timeout = self.page_has_provider_field("timeout");
+        let show_dsh_retry = self.current_page == ConfigFormat::DeepSeekHarness;
         let show_model_name = self.page_has_model_field("name");
         let show_model_context = self.page_has_model_field("context");
         let show_model_output = self.page_has_model_field("output");
@@ -1153,13 +1197,6 @@ impl App {
                         .small()
                         .color(egui::Color32::from_rgb(220, 90, 90)),
                 );
-            }
-            if show_oc {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("description").weak()),
-                );
-                ui.add(egui::TextEdit::singleline(&mut p.description).desired_width(450.0));
             }
             if show_oc {
                 ui.add_sized(
@@ -1268,12 +1305,31 @@ impl App {
             } else {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
             }
+            if show_dsh_retry {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("retryPolicy.mode").weak()),
+                );
+                ui.add(egui::TextEdit::singleline(&mut p.dsh_retry_mode).desired_width(100.0));
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("maxRetries").weak()),
+                );
+                numeric_text_edit(ui, &mut p.dsh_max_retries, 55.0, "3");
+            }
             if show_oc && show_provider_timeout {
                 ui.add_sized(
                     [60.0, 24.0],
                     egui::Label::new(egui::RichText::new(timeout_label).weak()),
                 );
                 numeric_text_edit(ui, &mut p.timeout, 53.0, "");
+            }
+            if show_dsh_retry {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("timeoutMs").weak()),
+                );
+                numeric_text_edit(ui, &mut p.dsh_timeout_ms, 70.0, "180000");
             }
             if !show_oc && !show_dsh {
                 ui.add_sized(
@@ -1583,17 +1639,6 @@ impl App {
                         .hint_text("openai")
                         .desired_width(120.0),
                 );
-                if show_oc {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("description").weak()),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_provider.description)
-                            .hint_text("简要描述此 provider")
-                            .desired_width(450.0),
-                    );
-                }
                 if show_oc {
                     ui.add_sized(
                         [60.0, 24.0],
@@ -2211,7 +2256,7 @@ impl App {
             Some(backend.load_target_root(path))
         };
         if fmt == ConfigFormat::DeepSeekHarness {
-            if let Some((provider, model)) = &self.dsh_default_model {
+            if let Some((provider, model, _effort)) = &self.dsh_default_model {
                 let valid = self.providers.iter().any(|p| {
                     p.key.trim() == provider.trim()
                         && p.models.iter().any(|m| m.id.trim() == model.trim())
@@ -2239,7 +2284,9 @@ impl App {
             // 未发生任何结构化修改时直接保留原始 YAML，避免无意义的
             // 缩进、引号、键顺序变化；实际修改后再使用稳定的 DSH 渲染器。
             match util::read_config_content(path) {
-                Ok(original) if util::parse_yaml_content(&original).ok().as_ref() == Some(&root) => {
+                Ok(original)
+                    if util::parse_yaml_content(&original).ok().as_ref() == Some(&root) =>
+                {
                     original
                 }
                 _ => backend.render(&root, self.save_format == SaveFormat::Compact)?,

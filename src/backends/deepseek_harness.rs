@@ -216,7 +216,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             .get("retryPolicy")
             .and_then(|value| value.get("mode"))
             .and_then(Value::as_str)
-            .unwrap_or_default()
+            .unwrap_or("normal")
             .to_string(),
         dsh_max_retries: v
             .get("retryPolicy")
@@ -228,7 +228,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             .get("retryPolicy")
             .and_then(|value| value.get("mode"))
             .and_then(Value::as_str)
-            .unwrap_or_default()
+            .unwrap_or("normal")
             .to_string(),
         original_dsh_max_retries: v
             .get("retryPolicy")
