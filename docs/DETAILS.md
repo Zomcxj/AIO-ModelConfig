@@ -1,6 +1,6 @@
 # ModelHarbor 技术细节
 
-本文为 [README](../README.md) 的详细补充：技术栈、构建细节、四格式字段对照、分页方言表单、DeepSeek Harness 配置说明、oh-my-pi 注意事项与平台安全说明。
+本文为 [README](../README.md) 的详细补充：技术栈、构建细节、各格式（opencode / pi-agent / oh-my-pi / DeepSeek Harness）字段对照、分页方言表单、注意事项与平台安全说明。
 
 ## 技术栈
 
@@ -39,7 +39,7 @@ cargo build --release
 
 ## 分页方言表单
 
-顶栏四个 agent 图标标签（opencode / DeepSeek Harness / oh-my-pi / pi-agent）点击切换；加载任意一份配置后四个页面共享同一份数据，修改 provider 参数在所有页面同步生效（provider/model 顺序亦跨页同步）；Agents 区块仅属于 opencode 页面；各页表单按自身方言显示字段与枚举（无对应字段不显示占位）：
+顶栏各 agent 图标标签（opencode / DeepSeek Harness / oh-my-pi / pi-agent）点击切换；加载任意一份配置后各页面共享同一份数据，修改 provider 参数在所有页面同步生效（provider/model 顺序亦跨页同步）；Agents 区块仅属于 opencode 页面；各页表单按自身方言显示字段与枚举（无对应字段不显示占位）：
 
 - **opencode 页**：`options.baseURL` / `options.timeout` / `npm` 下拉 / `limit.context` / `modalities` / `variants`（none…ultra）
 - **pi-agent 页**：`baseUrl` / `apiKey` / `api` 下拉（pi KnownApi 10 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinkingLevelMap`（off/minimal…max）
