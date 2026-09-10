@@ -225,7 +225,18 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         .get("compat")
         .and_then(|c| c.get("supportsDeveloperRole"))
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        // api 缺省时 pi 默认 openai-completions（chat/completions）。
+        .unwrap_or_else(|| !api.is_empty() && api != "openai-completions");
+    // pi 与 omp 的对应字段相互映射；缺省（opencode/dsh 转换或文件未声明）时不勾选。
+    let requires_reasoning_content = v
+        .get("compat")
+        .and_then(Value::as_object)
+        .and_then(|c| {
+            c.get("requiresReasoningContentOnAssistantMessages")
+                .or_else(|| c.get("requiresReasoningContentForAllAssistantTurns"))
+        })
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let r = ProviderRow {
         key: key.to_string(),
         description: String::new(),
@@ -236,15 +247,18 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         original_api_key_env: String::new(),
         api_key_secret: String::new(),
         original_api_key_secret: String::new(),
-        dsh_timeout_ms: String::new(),
+        // 跨格式保存到 DSH 时写出默认 timeoutMs。
+        dsh_timeout_ms: "180000".into(),
         dsh_retry_mode: "normal".into(),
         dsh_max_retries: String::new(),
-        original_dsh_timeout_ms: String::new(),
+        original_dsh_timeout_ms: "180000".into(),
         original_dsh_retry_mode: "normal".into(),
         original_dsh_max_retries: String::new(),
         timeout: "180000".into(),
         original_timeout: "180000".into(),
         compat,
+        requires_reasoning_content,
+        original_requires_reasoning_content: requires_reasoning_content,
         models,
         new_model: ModelRow::new(),
         source_format: Some(crate::format::ConfigFormat::PiAgent),
@@ -276,6 +290,24 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
         if c.is_empty() {
             obj.remove("compat");
         }
+    }
+    // requiresReasoningContentOnAssistantMessages（pi 键）：同格式未修改时
+    // 保留 raw 原样；跨格式或用户改动时写出当前值（缺省打勾）。
+    let native_pi = matches!(
+        p.source_format,
+        Some(crate::format::ConfigFormat::PiAgent) | Some(crate::format::ConfigFormat::OhMyPi)
+    );
+    if p.requires_reasoning_content != p.original_requires_reasoning_content || !native_pi {
+        let mut c = obj
+            .get("compat")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        c.insert(
+            "requiresReasoningContentOnAssistantMessages".into(),
+            Value::Bool(p.requires_reasoning_content),
+        );
+        obj.insert("compat".into(), Value::Object(c));
     }
     let api = if !p.npm.is_empty() {
         npm_to_api(&p.npm)

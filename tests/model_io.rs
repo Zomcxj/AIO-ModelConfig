@@ -167,6 +167,43 @@ fn provider_row_roundtrip() {
 }
 
 #[test]
+fn opencode_chat_completions_defaults_compat_false() {
+    // opencode 缺省 npm（等价 @ai-sdk/openai）或显式 @ai-sdk/openai(-compatible)
+    // 都是 chat/completions 风格，未声明 compat 时 supportsDeveloperRole 默认不勾选。
+    for npm in ["", "@ai-sdk/openai", "@ai-sdk/openai-compatible"] {
+        let v = json!({
+            "npm": npm,
+            "options": {"baseURL": "https://api.openai.com", "apiKey": "sk-xxx"},
+            "models": {}
+        });
+        let provider = ProviderRow::from("openai", &v);
+        assert!(!provider.compat, "npm={:?} 应默认不打勾", npm);
+    }
+    // 非 chat/completions（如 anthropic）保持默认勾选
+    let v = json!({
+        "npm": "@ai-sdk/anthropic",
+        "options": {"baseURL": "https://api.anthropic.com", "apiKey": "sk-xxx"},
+        "models": {}
+    });
+    let provider = ProviderRow::from("anthropic", &v);
+    assert!(provider.compat);
+}
+
+#[test]
+fn cross_format_source_writes_default_timeout_to_opencode() {
+    // pi 来源 → opencode：文件没有 options.timeout 时写出默认 180000。
+    let raw = json!({
+        "baseUrl": "https://x/v1",
+        "apiKey": "k",
+        "api": "openai-completions",
+        "models": []
+    });
+    let provider = model_harbor::convert::provider_from_pi("p", &raw);
+    let out = provider.to_value();
+    assert_eq!(out["options"]["timeout"], 180000);
+}
+
+#[test]
 fn load_or_empty_nonexistent_path() {
     let (root, agents, providers) = load_or_empty("C:\\nonexistent_path_12345.json");
     assert!(root.is_object());

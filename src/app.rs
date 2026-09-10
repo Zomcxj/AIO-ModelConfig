@@ -42,6 +42,127 @@ struct ModelFetchState {
 /// 新增 Provider 表单使用固定的内部 key 保存获取状态。
 const NEW_PROVIDER_FETCH_KEY: &str = "__new_provider__";
 
+/// 单个 provider 的延迟测试状态（provider 级 + 模型级并发）。
+#[derive(Default)]
+struct LatencyState {
+    /// provider 级：模型列表接口往返耗时（毫秒）。
+    provider: Option<Result<u64, String>>,
+    provider_rx: Option<std::sync::mpsc::Receiver<Result<u64, String>>>,
+    /// 模型级：模型 id → 往返耗时（毫秒）。
+    models: HashMap<String, Result<u64, String>>,
+    model_rx: Option<std::sync::mpsc::Receiver<(String, Result<u64, String>)>>,
+    /// 模型级测试进度：已完成 / 总数。
+    done: usize,
+    total: usize,
+}
+
+/// 延迟测试用的 HTTP 客户端（较短超时，避免卡住 UI 线程池）。
+fn latency_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build()
+}
+
+fn http_error(err: ureq::Error, elapsed: u64) -> String {
+    match err {
+        ureq::Error::Status(code, _) => format!("HTTP {}（{} ms）", code, elapsed),
+        ureq::Error::Transport(t) => format!("网络错误：{}", t),
+    }
+}
+
+/// 测量 provider 模型列表接口的往返延迟（毫秒）。
+fn measure_provider_latency(url: &str, secret: &str, api: &str) -> Result<u64, String> {
+    if url.is_empty() {
+        return Err("缺少 baseURL".to_string());
+    }
+    if secret.is_empty() {
+        return Err("缺少 API Key".to_string());
+    }
+    let agent = latency_agent();
+    let mut request = agent
+        .get(url)
+        .set("User-Agent", "model-harbor")
+        .set("Accept", "application/json");
+    if api == "anthropic-messages" {
+        request = request
+            .set("x-api-key", secret)
+            .set("anthropic-version", "2023-06-01");
+    } else {
+        request = request.set("Authorization", &format!("Bearer {}", secret));
+    }
+    let started = std::time::Instant::now();
+    let result = request.call();
+    let elapsed = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(_) => Ok(elapsed),
+        Err(err) => Err(http_error(err, elapsed)),
+    }
+}
+
+/// 模型对话接口地址（用于最小请求延迟测试）。
+fn chat_url(base_url: &str, api: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if api == "anthropic-messages" {
+        if base.ends_with("/v1") {
+            format!("{}/messages", base)
+        } else {
+            format!("{}/v1/messages", base)
+        }
+    } else {
+        format!("{}/chat/completions", base)
+    }
+}
+
+/// 对单个模型发一个最小请求，测量往返延迟（毫秒）。
+/// max_tokens=1 使消耗最小；失败仍会报出耗时，便于判断服务是否可达。
+fn measure_model_latency(
+    base_url: &str,
+    secret: &str,
+    api: &str,
+    model: &str,
+) -> Result<u64, String> {
+    if base_url.trim().is_empty() {
+        return Err("缺少 baseURL".to_string());
+    }
+    if secret.is_empty() {
+        return Err("缺少 API Key".to_string());
+    }
+    let url = chat_url(base_url, api);
+    let agent = latency_agent();
+    let started = std::time::Instant::now();
+    let result = if api == "anthropic-messages" {
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        agent
+            .post(&url)
+            .set("x-api-key", secret)
+            .set("anthropic-version", "2023-06-01")
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+    } else {
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "stream": false,
+            "messages": [{"role": "user", "content": "ping"}]
+        });
+        agent
+            .post(&url)
+            .set("Authorization", &format!("Bearer {}", secret))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+    };
+    let elapsed = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(_) => Ok(elapsed),
+        Err(err) => Err(http_error(err, elapsed)),
+    }
+}
+
 /// 调用 OpenAI 兼容 /models 接口获取模型 id 列表（后台线程内执行）。
 fn fetch_models_remote(url: &str, secret: &str, api: &str) -> Result<Vec<String>, String> {
     if url.is_empty() {
@@ -151,6 +272,8 @@ pub struct App {
     model_fetch: HashMap<String, ModelFetchState>,
     /// 已展开的模型获取面板（provider key）。
     model_fetch_open: HashSet<String>,
+    /// 每个 provider 的延迟测试状态（key → 状态）。
+    latency: HashMap<String, LatencyState>,
     theme: Theme,
     save_format: SaveFormat,
     /// 滚轮切换保存格式的门门：一次连续滚动手势只切换一次。
@@ -195,6 +318,7 @@ impl Default for App {
             model_drag_target: None,
             model_fetch: HashMap::new(),
             model_fetch_open: HashSet::new(),
+            latency: HashMap::new(),
             theme: Theme::default(),
             save_format: SaveFormat::default(),
             save_format_wheel_latch: false,
@@ -246,10 +370,17 @@ impl eframe::App for App {
                 .collect();
         }
         self.poll_model_fetch();
+        self.poll_latency();
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ui_page_header(ui);
+            // Agents / Providers 标题行固定在滚动区外：滚动条下拉后始终显示在顶部。
+            if self.current_page == ConfigFormat::Opencode {
+                self.ui_agents_header(ui);
+            }
+            self.ui_providers_header(ui);
+            ui.add_space(2.0);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .drag_to_scroll(false)
@@ -257,10 +388,10 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                     // Agents 仅属于 opencode 页面
                     if self.current_page == ConfigFormat::Opencode {
-                        self.ui_agents_section(ui);
+                        self.ui_agents_body(ui);
                         ui.add_space(8.0);
                     }
-                    self.ui_providers_section(ui);
+                    self.ui_providers_body(ui);
                     ui.add_space(8.0);
                 });
         });
@@ -324,6 +455,7 @@ impl App {
         // 重新加载后丢弃旧的模型获取状态
         self.model_fetch.clear();
         self.model_fetch_open.clear();
+        self.latency.clear();
         // 加载后跳转到来源格式对应的页面
         self.current_page = self.source_format;
         self.refresh_targets();
@@ -338,12 +470,11 @@ impl App {
                 for (i, b) in backends::BACKENDS.iter().enumerate() {
                     let id = b.id();
                     let btn = match icons.get(i).and_then(|o| o.as_ref()) {
-                        Some(tex) => egui::Button::image_and_text(
+                        Some(tex) => egui::Button::image(
                             egui::Image::from_texture(tex)
                                 .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-                            id.label(),
                         ),
-                        None => egui::Button::new(id.label()),
+                        None => egui::Button::new(""),
                     };
                     let is_selected = self.current_page == id;
                     let btn = if is_selected {
@@ -351,7 +482,8 @@ impl App {
                     } else {
                         btn
                     };
-                    if ui.add(btn).clicked() {
+                    // 只显示图标，鼠标悬停提示名称
+                    if ui.add(btn).on_hover_text(id.label()).clicked() {
                         if id == ConfigFormat::DeepSeekHarness
                             && self.current_page != ConfigFormat::DeepSeekHarness
                         {
@@ -366,16 +498,6 @@ impl App {
                     }
                 }
                 ui.separator();
-                if let Some(icon) = self.icon_for(self.source_format) {
-                    ui.add(
-                        egui::Image::from_texture(icon)
-                            .fit_to_exact_size(egui::vec2(12.0, 12.0)),
-                    );
-                }
-                ui.label(
-                    egui::RichText::new(format!("来源: {}", self.source_format.label()))
-                        .weak(),
-                );
                 // 右侧：WSL 同步 + 主题
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 按当前页面检测对应 agent 是否已在 WSL 安装
@@ -430,9 +552,16 @@ impl App {
                 {
                     self.reload();
                 }
-                if ui.button("加载").clicked() {
-                    self.reload();
+                // 文件来源显示在原本“加载”按钮的位置；加载改为回车或“浏览”。
+                if let Some(icon) = self.icon_for(self.source_format) {
+                    ui.add(
+                        egui::Image::from_texture(icon)
+                            .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                    );
                 }
+                ui.label(
+                    egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
+                );
                 if ui.button("浏览").clicked() {
                     if let Some(p) = show_file_dialog() {
                         self.config_path = p;
@@ -441,7 +570,7 @@ impl App {
                 }
                 if !self.config_path.is_empty() && self.config_path != self.loaded_path {
                     ui.label(egui::RichText::new("未加载").small().color(egui::Color32::from_rgb(220, 160, 60)))
-                        .on_hover_text("路径已修改但未加载：保存时将按“先读后合并”写入该路径（不破坏目标文件已有配置）。\n点击“加载”或在此按回车可切换到该文件。");
+                        .on_hover_text("路径已修改但未加载：保存时将按“先读后合并”写入该路径（不破坏目标文件已有配置）。\n在此按回车可切换到该文件。");
                 }
                 ui.separator();
                 ui.label("保存格式:");
@@ -497,7 +626,8 @@ impl App {
             });
     }
 
-    fn ui_agents_section(&mut self, ui: &mut egui::Ui) {
+    /// Agents 标题行：固定在滚动区外（滚动时始终显示在顶部）。
+    fn ui_agents_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Agents");
             let btn_label = if self.show_agents_section {
@@ -527,7 +657,10 @@ impl App {
             }
         });
         ui.separator();
+    }
 
+    /// Agents 内容区（标题行固定在滚动区外）。
+    fn ui_agents_body(&mut self, ui: &mut egui::Ui) {
         if !self.show_agents_section {
             return;
         }
@@ -1069,6 +1202,108 @@ impl App {
         );
     }
 
+    /// 启动 provider 级延迟测试（后台线程，结果经通道回传）。
+    /// 接收 `&mut HashMap` 而非 `&mut self`，以便与 `providers[idx]` 借用共存。
+    fn start_provider_latency(
+        latency: &mut HashMap<String, LatencyState>,
+        key: &str,
+        base_url: &str,
+        secret: &str,
+        api: &str,
+    ) {
+        let url = Self::models_url(base_url, api);
+        let secret = secret.trim().to_string();
+        let api = api.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(measure_provider_latency(&url, &secret, &api));
+        });
+        let state = latency.entry(key.to_string()).or_default();
+        state.provider = None;
+        state.provider_rx = Some(rx);
+    }
+
+    /// 并发启动全部模型的延迟测试（每批 8 个并发，结果逐个回传）。
+    /// 返回需要提示的状态栏消息（无模型可测时）。
+    fn start_models_latency(
+        latency: &mut HashMap<String, LatencyState>,
+        key: &str,
+        base_url: &str,
+        secret: &str,
+        api: &str,
+        models: Vec<String>,
+    ) -> Option<String> {
+        if models.is_empty() {
+            return Some("没有可测试的模型".to_string());
+        }
+        let base = base_url.to_string();
+        let secret = secret.trim().to_string();
+        let api = api.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let total = models.len();
+        std::thread::spawn(move || {
+            const BATCH: usize = 8;
+            for chunk in models.chunks(BATCH) {
+                std::thread::scope(|scope| {
+                    for model in chunk {
+                        let tx = tx.clone();
+                        let base = base.clone();
+                        let secret = secret.clone();
+                        let api = api.clone();
+                        scope.spawn(move || {
+                            let result = measure_model_latency(&base, &secret, &api, model);
+                            let _ = tx.send((model.clone(), result));
+                        });
+                    }
+                });
+            }
+        });
+        let state = latency.entry(key.to_string()).or_default();
+        state.models.clear();
+        state.done = 0;
+        state.total = total;
+        state.model_rx = Some(rx);
+        None
+    }
+
+    /// 每帧轮询延迟测试结果，并更新状态栏。
+    fn poll_latency(&mut self) {
+        let mut notices: Vec<String> = Vec::new();
+        for (_, state) in self.latency.iter_mut() {
+            if let Some(rx) = &state.provider_rx {
+                if let Ok(result) = rx.try_recv() {
+                    let msg = match &result {
+                        Ok(ms) => format!("provider 延迟测试完成：{} ms", ms),
+                        Err(err) => format!("provider 延迟测试失败：{}", err),
+                    };
+                    notices.push(msg);
+                    state.provider = Some(result);
+                    state.provider_rx = None;
+                }
+            }
+            if let Some(rx) = &state.model_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok((id, result)) => {
+                            state.models.insert(id, result);
+                            state.done += 1;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            state.model_rx = None;
+                            state.total = state.done;
+                            notices.push(format!("模型延迟测试完成（{}/{}）", state.done, state.total));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for msg in notices {
+            self.status = msg;
+        }
+    }
+
     /// 每帧轮询后台线程的模型获取结果，并更新状态栏。
     fn poll_model_fetch(&mut self) {
         let mut finished: Vec<String> = Vec::new();
@@ -1116,7 +1351,7 @@ impl App {
         }
     }
 
-    fn ui_providers_section(&mut self, ui: &mut egui::Ui) {
+    fn ui_providers_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Providers");
             let btn_label = if self.show_providers_section {
@@ -1147,9 +1382,41 @@ impl App {
                     }
                 }
             }
+            // 连通性测试：放在标题行右侧，收起全部卡片时也始终可见。
+            if self.show_providers_section
+                && ui
+                    .button("连通性测试")
+                    .on_hover_text("并发测试当前页面全部厂商的接口连通性")
+                    .clicked()
+            {
+                    let targets: Vec<(String, String, String, String)> = self
+                        .providers
+                        .iter()
+                        .map(|p| {
+                            let api = if p.pi_api.is_empty() {
+                                convert::npm_to_api(&p.npm)
+                            } else {
+                                p.pi_api.clone()
+                            };
+                            (
+                                p.key.clone(),
+                                p.base_url.clone(),
+                                credentials::effective_secret(p),
+                                api,
+                            )
+                        })
+                        .collect();
+                    let count = targets.len();
+                    for (key, base, secret, api) in targets {
+                        Self::start_provider_latency(&mut self.latency, &key, &base, &secret, &api);
+                    }
+                    self.status = format!("已开始一键延迟测试（{} 个厂商）", count);
+            }
         });
         ui.separator();
+    }
 
+    fn ui_providers_body(&mut self, ui: &mut egui::Ui) {
         if !self.show_providers_section {
             return;
         }
@@ -1410,6 +1677,21 @@ impl App {
                         }
                     });
             }
+            // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
+            if !show_oc && !show_dsh {
+                ui.add_sized(
+                    [60.0, 24.0],
+                    egui::Label::new(egui::RichText::new("compat").weak()),
+                );
+                ui.checkbox(&mut p.compat, "supportsDeveloperRole");
+                // pi / omp 相互映射字段：加载 opencode/dsh 时缺省不勾选。
+                let requires_label = if show_omp {
+                    "requiresReasoningContentForAllAssistantTurns"
+                } else {
+                    "requiresReasoningContentOnAssistantMessages"
+                };
+                ui.checkbox(&mut p.requires_reasoning_content, requires_label);
+            }
             if show_dsh_retry {
                 ui.add_sized(
                     [60.0, 24.0],
@@ -1459,18 +1741,13 @@ impl App {
                 );
                 numeric_text_edit(ui, &mut p.dsh_timeout_ms, 70.0, "180000");
             }
-            if !show_oc && !show_dsh {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("compat").weak()),
-                );
-                ui.checkbox(&mut p.compat, "supportsDeveloperRole");
-            }
         });
 
         ui.add_space(2.0);
         let mut fetch_request: Option<(String, String, String, String)> = None;
         let mut close_fetch = false;
+        let mut latency_provider: Option<(String, String, String, String)> = None;
+        let mut latency_models: Option<(String, String, Vec<String>, String)> = None;
         ui.horizontal(|ui| {
             ui.strong("Models");
             let fetch_api = if p.pi_api.is_empty() {
@@ -1480,12 +1757,75 @@ impl App {
             };
             let fetch_secret = credentials::effective_secret(p);
             if ui.button("获取模型").clicked() {
-                fetch_request = Some((p.key.clone(), p.base_url.clone(), fetch_secret, fetch_api));
+                fetch_request = Some((
+                    p.key.clone(),
+                    p.base_url.clone(),
+                    fetch_secret.clone(),
+                    fetch_api.clone(),
+                ));
             }
             if self.model_fetch_open.contains(&p.key) && ui.button("关闭").clicked() {
                 close_fetch = true;
             }
+            if ui.button("延迟测试").clicked() {
+                latency_provider = Some((
+                    p.key.clone(),
+                    p.base_url.clone(),
+                    fetch_secret.clone(),
+                    fetch_api.clone(),
+                ));
+            }
+            if ui.button("模型延迟").clicked() {
+                latency_models = Some((
+                    p.key.clone(),
+                    p.base_url.clone(),
+                    p.models
+                        .iter()
+                        .map(|m| m.id.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                    fetch_api.clone(),
+                ));
+            }
+            if let Some(state) = self.latency.get(&p.key) {
+                if state.provider_rx.is_some() {
+                    ui.add(egui::Spinner::new().size(12.0));
+                } else if let Some(res) = &state.provider {
+                    match res {
+                        Ok(ms) => {
+                            ui.label(
+                                egui::RichText::new(format!("provider {} ms", ms))
+                                    .color(egui::Color32::from_rgb(90, 180, 110)),
+                            );
+                        }
+                        Err(err) => {
+                            ui.label(
+                                egui::RichText::new("provider 延迟失败")
+                                    .color(egui::Color32::from_rgb(220, 90, 90)),
+                            )
+                            .on_hover_text(err);
+                        }
+                    }
+                }
+                if state.model_rx.is_some() {
+                    ui.label(
+                        egui::RichText::new(format!("模型 {}/{}", state.done, state.total))
+                            .small(),
+                    );
+                }
+            }
         });
+        if let Some((key, base, secret, api)) = latency_provider {
+            Self::start_provider_latency(&mut self.latency, &key, &base, &secret, &api);
+        }
+        if let Some((key, base, models, api)) = latency_models {
+            let secret = credentials::effective_secret(p);
+            if let Some(msg) =
+                Self::start_models_latency(&mut self.latency, &key, &base, &secret, &api, models)
+            {
+                self.status = msg;
+            }
+        }
         if let Some((key, base, secret, api)) = fetch_request {
             // 后台线程拉取模型列表（避免阻塞 UI），结果经通道回传。
             let url = Self::models_url(&base, &api);
@@ -1508,27 +1848,58 @@ impl App {
             self.model_fetch_open.remove(&p.key);
         }
         if self.model_fetch_open.contains(&p.key) {
-            if let Some(state) = self.model_fetch.get(&p.key) {
-                if state.rx.is_some() {
-                    ui.label(egui::RichText::new("正在获取模型…").weak());
-                } else if let Some(result) = &state.result {
-                    match result {
-                        Ok(models) if models.is_empty() => {
-                            ui.label(egui::RichText::new("接口未返回任何模型").weak());
-                        }
+            card_frame(ui, false, 0, |ui| {
+                if let Some(state) = self.model_fetch.get(&p.key) {
+                    if state.rx.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(16.0));
+                            ui.label(egui::RichText::new("正在获取模型…").weak());
+                        });
+                    } else if let Some(result) = &state.result {
+                        match result {
+                            Ok(models) if models.is_empty() => {
+                                ui.label(egui::RichText::new("接口未返回任何模型").weak());
+                            }
                         Ok(models) => {
                             let ids = models.clone();
                             ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
-                            for id in ids {
-                                let mut checked = p.models.iter().any(|m| m.id.trim() == id);
-                                if ui.checkbox(&mut checked, &id).changed() && checked {
-                                    let mut row = ModelRow::new();
-                                    row.id = id.clone();
-                                    row.name = id.clone();
-                                    row.source_format = Some(self.current_page);
-                                    p.models.push(row);
-                                }
-                            }
+                            // 最多 5 列横向排列；区域高度固定为 22 行，
+                            // 每列超出部分在区域内垂直滚动查看。
+                            let cols = ids.len().clamp(1, 5);
+                            let per_col = ids.len().div_ceil(cols);
+                            let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                            let prev_spacing_x = ui.spacing().item_spacing.x;
+                            ui.spacing_mut().item_spacing.x = 28.0;
+                            egui::ScrollArea::vertical()
+                                .id_salt("model_fetch_scroll")
+                                .max_height(row_h * 22.5)
+                                .auto_shrink([false, true])
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                )
+                                .show(ui, |ui| {
+                                    ui.columns(cols, |columns| {
+                                        for (ci, column) in columns.iter_mut().enumerate() {
+                                            column.set_min_width(150.0);
+                                            for id in
+                                                ids.iter().skip(ci * per_col).take(per_col)
+                                            {
+                                                let mut checked =
+                                                    p.models.iter().any(|m| m.id.trim() == id);
+                                                if column.checkbox(&mut checked, id).changed()
+                                                    && checked
+                                                {
+                                                    let mut row = ModelRow::new();
+                                                    row.id = id.clone();
+                                                    row.name = id.clone();
+                                                    row.source_format = Some(self.current_page);
+                                                    p.models.push(row);
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
+                            ui.spacing_mut().item_spacing.x = prev_spacing_x;
                         }
                         Err(err) => {
                             ui.label(
@@ -1541,6 +1912,7 @@ impl App {
             } else {
                 ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
             }
+            });
         }
         let mut rm: Option<usize> = None;
         let mut model_hover_target: Option<String> = None;
@@ -1571,7 +1943,31 @@ impl App {
                     if handle.drag_stopped() {
                         model_drag_stopped = true;
                     }
-                    ui.strong(format!("Model {}", j + 1));
+                    // 该行显示延迟（拖动按钮右侧），删除按钮右对齐。
+                    if let Some(state) = self.latency.get(&p.key) {
+                        if let Some(res) = state.models.get(p.models[j].id.trim()) {
+                            match res {
+                                Ok(ms) => {
+                                    ui.label(
+                                        egui::RichText::new(format!("延迟: {} ms", ms))
+                                            .color(egui::Color32::from_rgb(90, 180, 110)),
+                                    );
+                                }
+                                Err(err) => {
+                                    ui.label(
+                                        egui::RichText::new("延迟失败")
+                                            .color(egui::Color32::from_rgb(220, 90, 90)),
+                                    )
+                                    .on_hover_text(err);
+                                }
+                            }
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("删").clicked() {
+                            rm = Some(j);
+                        }
+                    });
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.add_sized(
@@ -1981,6 +2377,23 @@ impl App {
                             }
                         });
                 }
+                // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
+                if !show_oc && !show_dsh {
+                    ui.add_sized(
+                        [60.0, 24.0],
+                        egui::Label::new(egui::RichText::new("compat").weak()),
+                    );
+                    ui.checkbox(&mut self.new_provider.compat, "supportsDeveloperRole");
+                    let requires_label = if show_omp {
+                        "requiresReasoningContentForAllAssistantTurns"
+                    } else {
+                        "requiresReasoningContentOnAssistantMessages"
+                    };
+                    ui.checkbox(
+                        &mut self.new_provider.requires_reasoning_content,
+                        requires_label,
+                    );
+                }
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -2025,17 +2438,12 @@ impl App {
                     );
                     numeric_text_edit(ui, &mut self.new_provider.timeout, 70.0, "180000");
                 }
-                if !show_oc && !show_dsh {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("compat").weak()),
-                    );
-                    ui.checkbox(&mut self.new_provider.compat, "supportsDeveloperRole");
-                }
             });
             ui.add_space(2.0);
             let mut fetch_request: Option<(String, String, String)> = None;
             let mut close_fetch = false;
+            let mut latency_provider: Option<(String, String, String)> = None;
+            let mut latency_models: Option<(String, Vec<String>, String)> = None;
             ui.horizontal(|ui| {
                 ui.strong("Models");
                 let fetch_api = if self.new_provider.pi_api.is_empty() {
@@ -2045,15 +2453,86 @@ impl App {
                 };
                 let fetch_secret = credentials::effective_secret(&self.new_provider);
                 if ui.button("获取模型").clicked() {
-                    fetch_request =
-                        Some((self.new_provider.base_url.clone(), fetch_secret, fetch_api));
+                    fetch_request = Some((
+                        self.new_provider.base_url.clone(),
+                        fetch_secret.clone(),
+                        fetch_api.clone(),
+                    ));
                 }
                 if self.model_fetch_open.contains(NEW_PROVIDER_FETCH_KEY)
                     && ui.button("关闭").clicked()
                 {
                     close_fetch = true;
                 }
+                if ui.button("延迟测试").clicked() {
+                    latency_provider = Some((
+                        self.new_provider.base_url.clone(),
+                        fetch_secret.clone(),
+                        fetch_api.clone(),
+                    ));
+                }
+                if ui.button("模型延迟").clicked() {
+                    latency_models = Some((
+                        self.new_provider.base_url.clone(),
+                        self.new_provider
+                            .models
+                            .iter()
+                            .map(|m| m.id.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                        fetch_api.clone(),
+                    ));
+                }
+                if let Some(state) = self.latency.get(NEW_PROVIDER_FETCH_KEY) {
+                    if state.provider_rx.is_some() {
+                        ui.add(egui::Spinner::new().size(12.0));
+                    } else if let Some(res) = &state.provider {
+                        match res {
+                            Ok(ms) => {
+                                ui.label(
+                                    egui::RichText::new(format!("provider {} ms", ms))
+                                        .color(egui::Color32::from_rgb(90, 180, 110)),
+                                );
+                            }
+                            Err(err) => {
+                                ui.label(
+                                    egui::RichText::new("provider 延迟失败")
+                                        .color(egui::Color32::from_rgb(220, 90, 90)),
+                                )
+                                .on_hover_text(err);
+                            }
+                        }
+                    }
+                    if state.model_rx.is_some() {
+                        ui.label(
+                            egui::RichText::new(format!("模型 {}/{}", state.done, state.total))
+                                .small(),
+                        );
+                    }
+                }
             });
+            if let Some((base, secret, api)) = latency_provider {
+                Self::start_provider_latency(
+                    &mut self.latency,
+                    NEW_PROVIDER_FETCH_KEY,
+                    &base,
+                    &secret,
+                    &api,
+                );
+            }
+            if let Some((base, models, api)) = latency_models {
+                let secret = credentials::effective_secret(&self.new_provider);
+                if let Some(msg) = Self::start_models_latency(
+                    &mut self.latency,
+                    NEW_PROVIDER_FETCH_KEY,
+                    &base,
+                    &secret,
+                    &api,
+                    models,
+                ) {
+                    self.status = msg;
+                }
+            }
             if let Some((base, secret, api)) = fetch_request {
                 self.start_model_fetch(NEW_PROVIDER_FETCH_KEY, &base, &secret, &api);
                 self.model_fetch_open
@@ -2063,40 +2542,79 @@ impl App {
                 self.model_fetch_open.remove(NEW_PROVIDER_FETCH_KEY);
             }
             if self.model_fetch_open.contains(NEW_PROVIDER_FETCH_KEY) {
-                if let Some(state) = self.model_fetch.get(NEW_PROVIDER_FETCH_KEY) {
-                    if state.rx.is_some() {
-                        ui.label(egui::RichText::new("正在获取模型…").weak());
-                    } else if let Some(result) = &state.result {
-                        match result {
-                            Ok(models) if models.is_empty() => {
-                                ui.label(egui::RichText::new("接口未返回任何模型").weak());
-                            }
-                            Ok(models) => {
-                                let ids = models.clone();
-                                ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
-                                for id in ids {
-                                    let mut checked =
-                                        self.new_provider.models.iter().any(|m| m.id.trim() == id);
-                                    if ui.checkbox(&mut checked, &id).changed() && checked {
-                                        let mut row = ModelRow::new();
-                                        row.id = id.clone();
-                                        row.name = id.clone();
-                                        row.source_format = Some(self.current_page);
-                                        self.new_provider.models.push(row);
-                                    }
+                card_frame(ui, false, 0, |ui| {
+                    if let Some(state) = self.model_fetch.get(NEW_PROVIDER_FETCH_KEY) {
+                        if state.rx.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(16.0));
+                                ui.label(egui::RichText::new("正在获取模型…").weak());
+                            });
+                        } else if let Some(result) = &state.result {
+                            match result {
+                                Ok(models) if models.is_empty() => {
+                                    ui.label(egui::RichText::new("接口未返回任何模型").weak());
+                                }
+                                Ok(models) => {
+                                    let ids = models.clone();
+                                    ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
+                                    // 与 provider 表单一致：最多 5 列、高度固定 22 行、内部滚动。
+                                    let cols = ids.len().clamp(1, 5);
+                                    let per_col = ids.len().div_ceil(cols);
+                                    let row_h = ui.spacing().interact_size.y
+                                        + ui.spacing().item_spacing.y;
+                                    let prev_spacing_x = ui.spacing().item_spacing.x;
+                                    ui.spacing_mut().item_spacing.x = 28.0;
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("new_provider_fetch_scroll")
+                                        .max_height(row_h * 22.5)
+                                        .auto_shrink([false, true])
+                                        .scroll_bar_visibility(
+                                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                        )
+                                        .show(ui, |ui| {
+                                            ui.columns(cols, |columns| {
+                                                for (ci, column) in columns.iter_mut().enumerate() {
+                                                    column.set_min_width(150.0);
+                                                    for id in ids
+                                                        .iter()
+                                                        .skip(ci * per_col)
+                                                        .take(per_col)
+                                                    {
+                                                        let mut checked = self
+                                                            .new_provider
+                                                            .models
+                                                            .iter()
+                                                            .any(|m| m.id.trim() == id);
+                                                        if column
+                                                            .checkbox(&mut checked, id)
+                                                            .changed()
+                                                            && checked
+                                                        {
+                                                            let mut row = ModelRow::new();
+                                                            row.id = id.clone();
+                                                            row.name = id.clone();
+                                                            row.source_format =
+                                                                Some(self.current_page);
+                                                            self.new_provider.models.push(row);
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    ui.spacing_mut().item_spacing.x = prev_spacing_x;
+                                }
+                                Err(err) => {
+                                    ui.label(
+                                        egui::RichText::new(format!("获取失败：{}", err))
+                                            .color(egui::Color32::from_rgb(220, 90, 90)),
+                                    );
                                 }
                             }
-                            Err(err) => {
-                                ui.label(
-                                    egui::RichText::new(format!("获取失败：{}", err))
-                                        .color(egui::Color32::from_rgb(220, 90, 90)),
-                                );
-                            }
                         }
+                    } else {
+                        ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
                     }
-                } else {
-                    ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
-                }
+                });
             }
             let mut rm_new: Option<usize> = None;
             let mut move_new_request: Option<(usize, usize)> = None;
@@ -2104,16 +2622,39 @@ impl App {
                 let model_count = self.new_provider.models.len();
                 card_frame(ui, true, 0, |ui| {
                     ui.horizontal(|ui| {
-                        ui.strong(format!("Model {}", j + 1));
                         if j > 0 && ui.button("↑").clicked() {
                             move_new_request = Some((j, j - 1));
                         }
                         if j + 1 < model_count && ui.button("↓").clicked() {
                             move_new_request = Some((j, j + 1));
                         }
-                        if ui.button("删").clicked() {
-                            rm_new = Some(j);
+                        // 该行显示延迟（调整按钮右侧），删除按钮右对齐。
+                        if let Some(state) = self.latency.get(NEW_PROVIDER_FETCH_KEY) {
+                            if let Some(res) =
+                                state.models.get(self.new_provider.models[j].id.trim())
+                            {
+                                match res {
+                                    Ok(ms) => {
+                                        ui.label(
+                                            egui::RichText::new(format!("延迟: {} ms", ms))
+                                                .color(egui::Color32::from_rgb(90, 180, 110)),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        ui.label(
+                                            egui::RichText::new("延迟失败")
+                                                .color(egui::Color32::from_rgb(220, 90, 90)),
+                                        )
+                                        .on_hover_text(err);
+                                    }
+                                }
+                            }
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("删").clicked() {
+                                rm_new = Some(j);
+                            }
+                        });
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.add_sized(

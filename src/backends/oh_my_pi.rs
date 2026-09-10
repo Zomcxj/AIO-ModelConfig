@@ -201,6 +201,24 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
             obj.remove("compat");
         }
     }
+    // requiresReasoningContentForAllAssistantTurns（omp 键，与 pi 键相互映射）：
+    // 同格式未修改时保留 raw 原样；跨格式或用户改动时写出当前值（缺省打勾）。
+    let native_omp = matches!(
+        p.source_format,
+        Some(crate::format::ConfigFormat::PiAgent) | Some(crate::format::ConfigFormat::OhMyPi)
+    );
+    if p.requires_reasoning_content != p.original_requires_reasoning_content || !native_omp {
+        let mut c = obj
+            .get("compat")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        c.insert(
+            "requiresReasoningContentForAllAssistantTurns".into(),
+            Value::Bool(p.requires_reasoning_content),
+        );
+        obj.insert("compat".into(), Value::Object(c));
+    }
 
     let models: Vec<Value> = p.models.iter().map(model_to_omp).collect();
     obj.insert("models".into(), Value::Array(models));

@@ -184,6 +184,22 @@ fn provider_raw_fields_preserved_on_save() {
 }
 
 #[test]
+fn omp_requires_reasoning_content_written_from_opencode_source() {
+    // 加载 opencode（无该字段）→ omp 页面默认不勾选，保存时写入 false
+    let raw = json!({
+        "options": {"baseURL": "https://x/v1", "apiKey": "sk-test"},
+        "models": {}
+    });
+    let provider = ProviderRow::from("openai", &raw);
+    assert!(!provider.requires_reasoning_content);
+    let out = provider_to_omp(&provider);
+    assert_eq!(
+        out["compat"]["requiresReasoningContentForAllAssistantTurns"],
+        false
+    );
+}
+
+#[test]
 fn provider_compat_true_removes_flag_keeps_other_keys() {
     let mut p = ProviderRow::new();
     p.key = "p".into();

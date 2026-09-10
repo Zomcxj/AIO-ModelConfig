@@ -189,6 +189,21 @@ llm-pi-ai:
 }
 
 #[test]
+fn dsh_cross_format_save_writes_default_timeout() {
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    // opencode 来源（缺省 npm，无 timeout 字段）保存到 DSH 时，
+    // timeoutMs 默认值也要写入目标文件。
+    let raw = json!({
+        "options": {"baseURL": "https://x/v1", "apiKey": "sk-test"},
+        "models": {}
+    });
+    let provider = ProviderRow::from("openai_apizh", &raw);
+    let root = backend.serialize_root(&[], &[provider], &json!({}), None);
+    let saved = &root["llm-pi-ai"]["providers"]["openai_apizh"];
+    assert_eq!(saved["timeoutMs"], 180000);
+}
+
+#[test]
 fn dsh_native_model_without_optional_fields_stays_without_them() {
     let backend = backends::backend(ConfigFormat::DeepSeekHarness);
     let mut provider = ProviderRow::new();

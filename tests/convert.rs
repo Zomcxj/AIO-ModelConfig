@@ -1,5 +1,57 @@
 use model_harbor::convert;
+use model_harbor::model::ProviderRow;
 use serde_json::json;
+
+#[test]
+fn cross_format_opencode_source_writes_compat_false() {
+    // 从 opencode 加载（缺省 npm = chat/completions）保存到 pi/omp 时，
+    // 未显式声明的 supportsDeveloperRole 默认值也要写入目标文件。
+    let raw = json!({
+        "options": {"baseURL": "https://x/v1", "apiKey": "sk-test"},
+        "models": {}
+    });
+    let provider = ProviderRow::from("openai", &raw);
+    assert!(!provider.compat);
+    let out = convert::provider_to_pi(&provider);
+    assert_eq!(out["compat"]["supportsDeveloperRole"], false);
+}
+
+#[test]
+fn requires_reasoning_content_maps_pi_and_omp_keys() {
+    // omp 键 → pi 页面：值被映射到 pi 的键
+    let omp_raw = json!({
+        "baseUrl": "https://x/v1",
+        "apiKey": "k",
+        "api": "openai-completions",
+        "compat": {"requiresReasoningContentForAllAssistantTurns": false},
+        "models": []
+    });
+    let provider = convert::provider_from_pi("p", &omp_raw);
+    assert!(!provider.requires_reasoning_content);
+    // 同格式未修改 → 保存时保留 raw 原样
+    let out = convert::provider_to_pi(&provider);
+    assert_eq!(
+        out["compat"]["requiresReasoningContentForAllAssistantTurns"],
+        false
+    );
+    assert!(out["compat"].get("requiresReasoningContentOnAssistantMessages").is_none());
+}
+
+#[test]
+fn requires_reasoning_content_defaults_false_from_opencode() {
+    // 加载 opencode（无该字段）→ pi 页面默认不勾选，保存时写入 false
+    let raw = json!({
+        "options": {"baseURL": "https://x/v1", "apiKey": "sk-test"},
+        "models": {}
+    });
+    let provider = ProviderRow::from("openai", &raw);
+    assert!(!provider.requires_reasoning_content);
+    let out = convert::provider_to_pi(&provider);
+    assert_eq!(
+        out["compat"]["requiresReasoningContentOnAssistantMessages"],
+        false
+    );
+}
 
 #[test]
 fn api_to_npm_mapping() {
@@ -190,22 +242,23 @@ fn provider_to_pi_preserves_compat() {
 #[test]
 fn provider_to_pi_omits_compat_when_true() {
     let v = json!({
-        "baseUrl": "https://api.openai.com/v1",
+        "baseUrl": "https://api.anthropic.com",
         "apiKey": "sk-test",
-        "api": "openai-completions",
+        "api": "anthropic-messages",
         "compat": {
             "supportsDeveloperRole": true
         },
         "models": []
     });
-    let provider = convert::provider_from_pi("openai", &v);
+    let provider = convert::provider_from_pi("anthropic", &v);
     assert!(provider.compat);
     let output = convert::provider_to_pi(&provider);
     assert!(output.get("compat").is_none(), "compat should be omitted when true");
 }
 
 #[test]
-fn provider_to_pi_omits_compat_when_empty() {
+fn openai_completions_defaults_compat_false() {
+    // chat/completions 未显式声明 compat 时，supportsDeveloperRole 默认不打勾。
     let v = json!({
         "baseUrl": "https://api.openai.com/v1",
         "apiKey": "sk-test",
@@ -213,9 +266,9 @@ fn provider_to_pi_omits_compat_when_empty() {
         "models": []
     });
     let provider = convert::provider_from_pi("openai", &v);
-    assert!(provider.compat);
+    assert!(!provider.compat);
     let output = convert::provider_to_pi(&provider);
-    assert!(output.get("compat").is_none(), "compat should be omitted when not present");
+    assert_eq!(output["compat"]["supportsDeveloperRole"], false);
 }
 
 #[test]

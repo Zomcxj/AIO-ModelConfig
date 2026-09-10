@@ -385,6 +385,12 @@ pub struct ProviderRow {
     /// 加载时的 timeout（含缺省默认化），用于区分“未动过”与“用户修改”。
     pub original_timeout: String,
     pub compat: bool,
+    /// pi: compat.requiresReasoningContentOnAssistantMessages；
+    /// omp: compat.requiresReasoningContentForAllAssistantTurns（相互映射）。
+    /// 加载 opencode/dsh 或新建时缺省为 false（不勾选）。
+    pub requires_reasoning_content: bool,
+    /// 加载时的值，用于同格式未修改时不改写 raw。
+    pub original_requires_reasoning_content: bool,
     pub models: Vec<ModelRow>,
     pub new_model: ModelRow,
     /// raw 所属格式；None 表示在当前页面中新建的条目。
@@ -410,7 +416,14 @@ impl ProviderRow {
             .get("compat")
             .and_then(|c| c.get("supportsDeveloperRole"))
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or_else(|| {
+                // opencode 缺省 npm 等价于 @ai-sdk/openai（chat/completions）；
+                // 这类 api 不支持 developer role，没有显式声明时不勾选。
+                !matches!(
+                    str_at(v, "npm"),
+                    "" | "@ai-sdk/openai" | "@ai-sdk/openai-compatible"
+                )
+            });
         Self {
             key: key.to_string(),
             description: str_at(v, "description").to_string(),
@@ -421,10 +434,11 @@ impl ProviderRow {
             original_api_key_env: String::new(),
             api_key_secret: String::new(),
             original_api_key_secret: String::new(),
-            dsh_timeout_ms: String::new(),
+            // 跨格式保存到 DSH 时写出默认 timeoutMs；同格式未修改不写。
+            dsh_timeout_ms: "180000".into(),
             dsh_retry_mode: "normal".into(),
             dsh_max_retries: String::new(),
-            original_dsh_timeout_ms: String::new(),
+            original_dsh_timeout_ms: "180000".into(),
             original_dsh_retry_mode: "normal".into(),
             original_dsh_max_retries: String::new(),
             timeout: {
@@ -444,6 +458,9 @@ impl ProviderRow {
                 }
             },
             compat,
+            // opencode 无该字段：默认不勾选。
+            requires_reasoning_content: false,
+            original_requires_reasoning_content: false,
             models,
             new_model: ModelRow::new(),
             source_format: Some(ConfigFormat::Opencode),
@@ -463,15 +480,18 @@ impl ProviderRow {
             original_api_key_env: String::new(),
             api_key_secret: String::new(),
             original_api_key_secret: String::new(),
-            dsh_timeout_ms: String::new(),
+            // 新建 provider 的默认值：跨格式保存时也写入目标文件的默认字段。
+            dsh_timeout_ms: "180000".into(),
             dsh_retry_mode: "normal".into(),
             dsh_max_retries: String::new(),
-            original_dsh_timeout_ms: String::new(),
+            original_dsh_timeout_ms: "180000".into(),
             original_dsh_retry_mode: "normal".into(),
             original_dsh_max_retries: String::new(),
-            timeout: String::new(),
-            original_timeout: String::new(),
-            compat: true,
+            timeout: "180000".into(),
+            original_timeout: "180000".into(),
+            compat: false,
+            requires_reasoning_content: false,
+            original_requires_reasoning_content: false,
             models: Vec::new(),
             new_model: ModelRow::new(),
             source_format: None,

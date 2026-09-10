@@ -247,7 +247,12 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         // 切到 opencode 页时沿用 DSH 的 timeoutMs（缺省 180000）。
         timeout: timeout_text.clone(),
         original_timeout: timeout_text.clone(),
-        compat: true,
+        // DSH 无 compat 键；api 缺省或 openai-completions（chat/completions）
+        // 不支持 developer role，默认不勾选。
+        compat: !api.is_empty() && api != "openai-completions",
+        // DSH 无该字段：转到 pi/omp 页面时默认不勾选。
+        requires_reasoning_content: false,
+        original_requires_reasoning_content: false,
         models,
         new_model: ModelRow::new(),
         source_format: Some(ConfigFormat::DeepSeekHarness),
