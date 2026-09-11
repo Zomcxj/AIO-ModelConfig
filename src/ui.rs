@@ -23,25 +23,31 @@ pub fn card_frame<R>(
         .stroke(egui::Stroke::new(stroke_width, stroke_color))
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            ui.style_mut().spacing.item_spacing = egui::vec2(2.0, 2.0);
+            ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 2.0);
             add(ui);
         })
         .response
 }
 
-/// 表单字段标签：定宽槽内**右对齐**，让标签紧贴其后的输入框；
-/// 超长截断并悬停显示完整文本，避免长标签折行错位。
+/// 表单字段标签：**左对齐**且宽度按文本内容自适应（上限 `max_width`），
+/// 既不在左侧留空白，也紧贴其后的输入框；超长时截断并悬停显示完整文本。
 ///
 /// 注意：不能用 `add_sized` —— 它内部是 `Layout::centered_and_justified`，
-/// 会把文本居中在槽内（`halign(RIGHT)` 不生效），短标签（key、id:）
-/// 与其控件之间会空出几十像素。
-pub fn field_label(ui: &mut egui::Ui, width: f32, text: impl Into<String>) -> egui::Response {
+/// 会把文本居中在定宽槽内。
+pub fn field_label(ui: &mut egui::Ui, max_width: f32, text: impl Into<String>) -> egui::Response {
     let text = text.into();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_width = ui.fonts(|f| {
+        f.layout_no_wrap(text.clone(), font, egui::Color32::WHITE)
+            .size()
+            .x
+    });
+    let width = text_width.min(max_width);
     let label = egui::Label::new(egui::RichText::new(text.as_str()).weak()).truncate();
     let resp = ui
         .allocate_ui_with_layout(
             egui::vec2(width, 24.0),
-            egui::Layout::right_to_left(egui::Align::Center),
+            egui::Layout::left_to_right(egui::Align::Center),
             |ui| ui.add(label),
         )
         .inner;
