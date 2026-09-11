@@ -375,3 +375,54 @@ fn load_opencode_result_nonexistent_is_ok_empty() {
     assert!(agents.is_empty());
     assert!(providers.is_empty());
 }
+
+#[test]
+fn new_model_writes_defaults_for_reasoning_tool_call_and_limit() {
+    // 新增模型默认勾选 reasoning/tool_call，并预填上下文/输出上限，
+    // 保存后这些字段自动写出（与 gpt-5.6-sol 的语义一致）。
+    let mut model = ModelRow::new();
+    model.id = "glm-5.3".into();
+    model.name = "glm-5.3".into();
+    let out = model.to_value();
+    assert_eq!(out["reasoning"], true);
+    assert_eq!(out["tool_call"], true);
+    assert_eq!(out["limit"]["context"], 272000);
+    assert_eq!(out["limit"]["output"], 128000);
+}
+
+#[test]
+fn new_model_fields_in_canonical_opencode_order() {
+    // 新建模型按 opencode 惯例键顺序输出：name → modalities → reasoning →
+    // tool_call → limit → options → variants。
+    let mut model = ModelRow::new();
+    model.id = "glm-5.3".into();
+    model.name = "glm-5.3".into();
+    model.modalities_input = "text".into();
+    let out = model.to_value();
+    let keys: Vec<&str> = out
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["name", "modalities", "reasoning", "tool_call", "limit"],
+        "新模型键顺序应为 opencode 惯例顺序"
+    );
+}
+
+#[test]
+fn existing_model_key_order_preserved_when_unmodified() {
+    // 同格式已有 raw 的模型不重排键顺序（最小 diff），只更新实际改动字段。
+    let v = json!({"variants": {"high": {}}, "name": "m", "reasoning": true});
+    let model = ModelRow::from("m", &v);
+    let out = model.to_value();
+    let keys: Vec<&str> = out
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["variants", "name", "reasoning"]);
+}

@@ -91,10 +91,17 @@ fn thinking_values(v: &Value) -> String {
 pub fn model_from_pi(v: &Value) -> ModelRow {
     let id = str_at(v, "id").to_string();
     let modalities_input = nested_list_str(v, &["input"]);
+    // pi/omp 用 reasoning 布尔表达是否支持思考；部分配置只写了 thinking 块 /
+    // thinkingLevelMap（DSH 则为 reasoningEfforts），这些同样意味着支持思考，
+    // 否则勾选状态在其他页面显示不出来。
+    let reasoning = bool_at(v, "reasoning")
+        || v.get("thinkingLevelMap").is_some()
+        || v.get("thinking").is_some()
+        || v.get("reasoningEfforts").is_some();
     ModelRow {
         id: id.clone(),
         name: str_at(v, "name").to_string(),
-        reasoning: bool_at(v, "reasoning"),
+        reasoning,
         tool_call: true,
         store: false,
         context: num_at(v, "contextWindow"),

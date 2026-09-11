@@ -162,14 +162,22 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
     ))
 }
 
-fn order_fields(mut object: Map<String, Value>, keys: &[&str]) -> Map<String, Value> {
+/// 按键顺序重排：`keys` 中的键排在前面，其余键保持原顺序。
+/// 注意：不能用 `Map::remove` —— 启用 preserve_order 时 serde_json 的
+/// `remove` 是 swap_remove（把末尾元素填到被删位置），会把其余键的顺序打乱，
+/// 例如 DSH 的 timeoutMs 会跑到 retryPolicy 之前，保存时产生无意义重排。
+fn order_fields(object: Map<String, Value>, keys: &[&str]) -> Map<String, Value> {
     let mut ordered = Map::new();
     for key in keys {
-        if let Some(value) = object.remove(*key) {
-            ordered.insert((*key).to_string(), value);
+        if let Some(value) = object.get(*key) {
+            ordered.insert((*key).to_string(), value.clone());
         }
     }
-    ordered.extend(object);
+    for (key, value) in &object {
+        if !keys.contains(&key.as_str()) {
+            ordered.insert(key.clone(), value.clone());
+        }
+    }
     ordered
 }
 
@@ -501,18 +509,12 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
                 .collect(),
         ),
     );
-    if p.dsh_timeout_ms != p.original_dsh_timeout_ms || !preserve_raw {
-        if let Ok(value) = p.dsh_timeout_ms.parse::<i64>() {
-            obj.insert("timeoutMs".into(), value.into());
-        } else {
-            obj.remove("timeoutMs");
-        }
-    }
     if p.dsh_retry_mode != p.original_dsh_retry_mode
         || p.dsh_max_retries != p.original_dsh_max_retries
         || !preserve_raw
     {
-        if p.dsh_retry_mode.trim().is_empty() {
+        let retries_set = p.dsh_max_retries.trim().parse::<i64>().is_ok();
+        if p.dsh_retry_mode.trim().is_empty() && !retries_set {
             obj.remove("retryPolicy");
         } else {
             let mut policy = obj
@@ -520,13 +522,28 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            policy.insert("mode".into(), Value::String(p.dsh_retry_mode.clone()));
+            // mode 留空但填了 maxRetries 时按 DSH 默认 normal 写入，
+            // 否则整个 retryPolicy 块被删除、maxRetries 丢失。
+            let mode = if p.dsh_retry_mode.trim().is_empty() {
+                "normal"
+            } else {
+                p.dsh_retry_mode.as_str()
+            };
+            policy.insert("mode".into(), Value::String(mode.to_string()));
             if let Ok(value) = p.dsh_max_retries.parse::<i64>() {
                 policy.insert("maxRetries".into(), value.into());
             } else {
                 policy.remove("maxRetries");
             }
             obj.insert("retryPolicy".into(), Value::Object(policy));
+        }
+    }
+    // retryPolicy 在 timeoutMs 之前写出，与 DSH 文件惯例一致（最小 diff）。
+    if p.dsh_timeout_ms != p.original_dsh_timeout_ms || !preserve_raw {
+        if let Ok(value) = p.dsh_timeout_ms.parse::<i64>() {
+            obj.insert("timeoutMs".into(), value.into());
+        } else {
+            obj.remove("timeoutMs");
         }
     }
     Value::Object(order_fields(

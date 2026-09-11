@@ -183,11 +183,12 @@ impl ModelRow {
         Self {
             id: String::new(),
             name: String::new(),
-            reasoning: false,
-            tool_call: false,
+            // 新增模型的缺省值：默认支持思考与工具调用，并预填常用上下文/输出上限。
+            reasoning: true,
+            tool_call: true,
             store: false,
-            context: String::new(),
-            output: String::new(),
+            context: "272000".into(),
+            output: "128000".into(),
             modalities_input: String::new(),
             modalities_output: String::new(),
             variants: String::new(),
@@ -352,8 +353,44 @@ impl ModelRow {
                 m.insert("variants".into(), Value::Object(variants_map));
             }
         }
+        // 新建模型 / 跨格式写入时按 opencode 惯例键顺序输出（name、modalities、
+        // reasoning、tool_call、limit、options、variants），与配置文件保持一致；
+        // 同格式已有 raw 的模型保留原有键顺序，避免无意义的整文件重排。
+        let raw_empty = match self.raw.as_object() {
+            Some(obj) => obj.is_empty(),
+            None => true,
+        };
+        if convert_dialect || raw_empty {
+            m = canonical_model_order(m);
+        }
         Value::Object(m)
     }
+}
+
+/// opencode 模型的惯例键顺序（未列举的键按原顺序追加在后）。
+const MODEL_KEY_ORDER: &[&str] = &[
+    "name",
+    "modalities",
+    "reasoning",
+    "tool_call",
+    "limit",
+    "options",
+    "variants",
+];
+
+fn canonical_model_order(m: Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    for key in MODEL_KEY_ORDER {
+        if let Some(value) = m.get(*key) {
+            out.insert((*key).to_string(), value.clone());
+        }
+    }
+    for (key, value) in m {
+        if !MODEL_KEY_ORDER.contains(&key.as_str()) {
+            out.insert(key, value);
+        }
+    }
+    out
 }
 
 #[derive(Clone)]

@@ -383,6 +383,8 @@ pub struct App {
     preview_dirty_at: Option<f64>,
     /// 最近一次文本解析是否成功（解析失败不写盘、不覆盖文本）。
     preview_parse_ok: bool,
+    /// 最近一次预览文本解析失败的报错（成功时为 None），用于面板内红字提示。
+    preview_parse_error: Option<String>,
     /// 光标所在行（1-based；失焦时保留最后位置）。
     preview_cursor_line: usize,
     load_error: Option<String>,
@@ -435,6 +437,7 @@ impl Default for App {
             preview_draft: String::new(),
             preview_dirty_at: None,
             preview_parse_ok: true,
+            preview_parse_error: None,
             preview_cursor_line: 1,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
@@ -1191,7 +1194,14 @@ impl App {
                 },
                 ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
                     "name" => model.raw.get("name").is_some(),
-                    "reasoning" => model.raw.get("reasoning").is_some(),
+                    // reasoning 也可由 pi/omp 的 thinking 块 / thinkingLevelMap 表达，
+                    // 只写了这些键时同样应显示（并勾选）reasoning。
+                    "reasoning" => {
+                        model.raw.get("reasoning").is_some()
+                            || model.raw.get("thinkingLevelMap").is_some()
+                            || model.raw.get("thinking").is_some()
+                            || model.raw.get("reasoningEfforts").is_some()
+                    }
                     "context" => model.raw.get("contextWindow").is_some(),
                     "output" => model.raw.get("maxTokens").is_some(),
                     "input" => model.raw.get("input").is_some(),
@@ -1583,6 +1593,7 @@ impl App {
                         // 打开时以组件状态重建待保存文档
                         self.preview_focused = false;
                         self.preview_parse_ok = true;
+                        self.preview_parse_error = None;
                         self.preview_dirty_at = None;
                     }
                 }
@@ -3211,6 +3222,26 @@ impl App {
             }
         });
         ui.separator();
+        // 预览文本解析失败：面板内红字提示（生成失败指序列化阶段，这里指解析阶段）。
+        if let Some(e) = &self.preview_parse_error {
+            egui::Frame::default()
+                .fill(egui::Color32::from_rgb(60, 20, 20))
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 140, 140),
+                            "⚠ 格式错误",
+                        );
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 180, 180),
+                            egui::RichText::new(e).small(),
+                        )
+                        .on_hover_text("继续编辑修正，或切走再切回以撤销文本修改");
+                    });
+                });
+            ui.add_space(4.0);
+        }
         // 文本框：常规自上而下布局的最后一个元素，占满剩余高度，
         // 滚轮/滚动条均正常（用 bottom_up 会把滚动错位到底部）。
         let text_width = (ui.available_width() - 14.0).max(120.0);
@@ -3305,6 +3336,7 @@ impl App {
                 self.load_error = None;
                 self.source_format = fmt;
                 self.preview_parse_ok = true;
+                self.preview_parse_error = None;
                 self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
                 self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
                 self.model_fetch.clear();
@@ -3314,6 +3346,7 @@ impl App {
             }
             Err(e) => {
                 self.preview_parse_ok = false;
+                self.preview_parse_error = Some(e.clone());
                 self.status = format!("预览内容解析失败：{}（继续编辑或撤销）", e);
                 false
             }

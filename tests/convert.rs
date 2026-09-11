@@ -490,3 +490,13 @@ fn anthropic_proxy_url_v1_preserved() {
         "proxy URLs must not be rewritten"
     );
 }
+
+#[test]
+fn pi_model_with_thinking_only_counts_as_reasoning() {
+    // pi/omp 只写 thinkingLevelMap / thinking 块（DSH 为 reasoningEfforts）时，
+    // reasoning 也应判定为开启，否则这些模型的勾选状态在其他页面显示不出来。
+    assert!(convert::model_from_pi(&json!({"id": "m", "thinkingLevelMap": {"high": "high"}})).reasoning);
+    assert!(convert::model_from_pi(&json!({"id": "m", "thinking": {"mode": "effort"}})).reasoning);
+    assert!(convert::model_from_pi(&json!({"id": "m", "reasoningEfforts": {"high": "high"}})).reasoning);
+    assert!(!convert::model_from_pi(&json!({"id": "m", "reasoning": false})).reasoning);
+}

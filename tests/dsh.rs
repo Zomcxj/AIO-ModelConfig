@@ -209,11 +209,11 @@ fn dsh_native_model_without_optional_fields_stays_without_them() {
     let mut provider = ProviderRow::new();
     provider.key = "demo".into();
     provider.source_format = Some(ConfigFormat::DeepSeekHarness);
-    let mut model = model_harbor::model::ModelRow::new();
-    model.id = "m1".into();
+    // 走真实加载路径构造模型（raw 无 contextWindow/maxTokens/reasoningEfforts 等可选字段）。
+    // 不用 ModelRow::new()：那是 UI 新增模型的缺省态（自带默认值）。
+    let raw = json!({"id": "m1", "custom": {"keep": true}});
+    let mut model = model_harbor::convert::model_from_pi(&raw);
     model.source_format = Some(ConfigFormat::DeepSeekHarness);
-    model.raw = json!({"id": "m1", "custom": {"keep": true}});
-    model.original_variants = String::new();
     provider.models.push(model);
     let root = backend.serialize_root(&[], &[provider], &json!({}), None);
     let saved = &root["llm-pi-ai"]["providers"]["demo"]["models"][0];
@@ -259,4 +259,55 @@ fn dsh_missing_timeout_defaults_to_180000_without_writeback() {
     let demo = &root["llm-pi-ai"]["providers"]["demo"];
     assert!(demo.get("timeoutMs").is_none());
     assert!(demo.get("retryPolicy").is_none());
+}
+
+#[test]
+fn dsh_max_retries_written_even_when_mode_empty() {
+    // 只填 maxRetries、mode 留空时：mode 按 DSH 默认 normal 写出，
+    // 不能因为 mode 为空把整个 retryPolicy（含 maxRetries）删掉。
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.source_format = Some(ConfigFormat::DeepSeekHarness);
+    provider.dsh_retry_mode = String::new();
+    provider.dsh_max_retries = "5".into();
+    let root = backend.serialize_root(&[], &[provider], &json!({}), None);
+    let demo = &root["llm-pi-ai"]["providers"]["demo"];
+    assert_eq!(demo["retryPolicy"]["mode"], "normal");
+    assert_eq!(demo["retryPolicy"]["maxRetries"], 5);
+}
+
+#[test]
+fn dsh_retry_policy_removed_when_mode_and_retries_empty() {
+    // mode 与 maxRetries 都为空时仍不写 retryPolicy（跨格式也不凭空添加）。
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.dsh_retry_mode = String::new();
+    provider.dsh_max_retries = String::new();
+    let root = backend.serialize_root(&[], &[provider], &json!({}), None);
+    let demo = &root["llm-pi-ai"]["providers"]["demo"];
+    assert!(demo.get("retryPolicy").is_none());
+}
+
+#[test]
+fn dsh_writes_retry_policy_before_timeout_ms() {
+    // 字段顺序与 DSH 文件惯例一致：models → retryPolicy → timeoutMs（最小 diff）。
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.dsh_retry_mode = "normal".into();
+    provider.dsh_max_retries = "3".into();
+    provider.dsh_timeout_ms = "180000".into();
+    let root = backend.serialize_root(&[], &[provider], &json!({}), None);
+    let demo = &root["llm-pi-ai"]["providers"]["demo"];
+    let keys: Vec<&str> = demo
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let rp = keys.iter().position(|k| *k == "retryPolicy").unwrap();
+    let tm = keys.iter().position(|k| *k == "timeoutMs").unwrap();
+    assert!(rp < tm, "retryPolicy 应排在 timeoutMs 之前，实际顺序 {keys:?}");
 }
