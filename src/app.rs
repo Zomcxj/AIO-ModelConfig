@@ -383,6 +383,8 @@ pub struct App {
     preview_dirty_at: Option<f64>,
     /// 最近一次文本解析是否成功（解析失败不写盘、不覆盖文本）。
     preview_parse_ok: bool,
+    /// 光标所在行（1-based；失焦时保留最后位置）。
+    preview_cursor_line: usize,
     load_error: Option<String>,
     pi_extras: Value,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
@@ -433,6 +435,7 @@ impl Default for App {
             preview_draft: String::new(),
             preview_dirty_at: None,
             preview_parse_ok: true,
+            preview_cursor_line: 1,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
             backend_icons: Vec::new(),
@@ -3204,55 +3207,108 @@ impl App {
                 }
             }
         }
-        // 文本框：放在滚动区内，内容超出面板时支持滚轮与滚动条拖动。
-        let text_width = (ui.available_width() - 14.0).max(120.0);
-        let mut edited = false;
-        egui::ScrollArea::vertical()
-            .id_salt("preview_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let edit = egui::TextEdit::multiline(&mut self.preview_draft)
-                    .font(egui::TextStyle::Monospace)
-                    .code_editor()
-                    .desired_width(text_width)
-                    .desired_rows(24)
-                    .hint_text(
-                        "在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存",
-                    );
-                let resp = ui.add(edit);
-                self.preview_focused = resp.has_focus();
-                if resp.changed() && self.preview_focused {
-                    edited = true;
+        // 自下而上布局：先排底部（行数、按钮），文本区占满剩余空间，
+        // 避免 ScrollArea::auto_shrink([false,false]) 吃满高度把底部行挤出可视区。
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("立即保存")
+                    .on_hover_text("立即将当前编辑内容写入目标文件（自动保存的立即版）")
+                    .clicked()
+                {
+                    self.preview_autosave();
+                }
+                if ui.button("关闭").clicked() {
+                    self.show_preview = false;
+                }
+                if !self.preview_focused {
+                    ui.weak("组件改动 → 文本实时同步；文本编辑 → 实时应用并自动保存");
+                } else {
+                    ui.weak("编辑中：以文本为准，失焦后回到组件同步");
                 }
             });
-        // 编辑 → 实时解析并应用回组件状态（解析失败不写盘、不覆盖）。
-        if edited {
-            self.apply_preview_draft();
-            self.preview_dirty_at = Some(now);
-        }
-        // 防抖自动保存：解析成功且停止输入 0.8s 后写盘。
-        if let Some(at) = self.preview_dirty_at {
-            if now - at > 0.8 {
-                self.preview_dirty_at = None;
-                self.preview_autosave();
+            // 总行数 + 光标所在行（失焦时保留最后位置，弱化显示）。
+            let total_lines =
+                self.preview_draft.chars().filter(|c| *c == '\n').count() + 1;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("共 {} 行", total_lines))
+                        .small()
+                        .weak(),
+                )
+                .on_hover_text("当前待保存文档的总行数");
+                if self.preview_focused {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "第 {} 行",
+                            self.preview_cursor_line
+                        ))
+                        .small()
+                        .color(egui::Color32::from_rgb(120, 170, 240)),
+                    )
+                    .on_hover_text("光标所在行");
+                } else {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "第 {} 行（未编辑）",
+                            self.preview_cursor_line
+                        ))
+                        .small()
+                        .weak(),
+                    )
+                    .on_hover_text("上次光标所在行");
+                }
+            });
+            ui.separator();
+            // 文本框：占满剩余高度，内容超出时支持滚轮与滚动条拖动。
+            let text_width = (ui.available_width() - 14.0).max(120.0);
+            let mut edited = false;
+            let mut cursor_line: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .id_salt("preview_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let edit = egui::TextEdit::multiline(&mut self.preview_draft)
+                        .font(egui::TextStyle::Monospace)
+                        .code_editor()
+                        .desired_width(text_width)
+                        .desired_rows(24)
+                        .hint_text(
+                            "在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存",
+                        );
+                    // 用 show 而非 add：需要 output.cursor_range 计算光标所在行。
+                    let output = edit.show(ui);
+                    let resp = output.response;
+                    self.preview_focused = resp.has_focus();
+                    if let Some(range) = output.cursor_range {
+                        let idx = range.primary.ccursor.index;
+                        let line = self
+                            .preview_draft
+                            .chars()
+                            .take(idx)
+                            .filter(|c| *c == '\n')
+                            .count()
+                            + 1;
+                        cursor_line = Some(line);
+                    }
+                    if resp.changed() && self.preview_focused {
+                        edited = true;
+                    }
+                });
+            if let Some(line) = cursor_line {
+                self.preview_cursor_line = line;
             }
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui
-                .button("立即保存")
-                .on_hover_text("立即将当前编辑内容写入目标文件（自动保存的立即版）")
-                .clicked()
-            {
-                self.preview_autosave();
+            // 编辑 → 实时解析并应用回组件状态（解析失败不写盘、不覆盖）。
+            if edited {
+                self.apply_preview_draft();
+                self.preview_dirty_at = Some(now);
             }
-            if ui.button("关闭").clicked() {
-                self.show_preview = false;
-            }
-            if !self.preview_focused {
-                ui.weak("组件改动 → 文本实时同步；文本编辑 → 实时应用并自动保存");
-            } else {
-                ui.weak("编辑中：以文本为准，失焦后回到组件同步");
+            // 防抖自动保存：解析成功且停止输入 0.8s 后写盘。
+            if let Some(at) = self.preview_dirty_at {
+                if now - at > 0.8 {
+                    self.preview_dirty_at = None;
+                    self.preview_autosave();
+                }
             }
         });
     }
