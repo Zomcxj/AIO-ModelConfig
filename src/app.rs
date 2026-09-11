@@ -375,10 +375,14 @@ pub struct App {
     show_api_keys: bool,
     /// 右侧配置预览/编辑面板是否打开。
     show_preview: bool,
-    /// 预览进入手动编辑后停止自动同步（false = 实时同步组件改动）。
-    preview_manual: bool,
-    /// 预览文本框缓冲（自动同步时每帧重写）。
+    /// 预览文本框是否持有焦点（编辑中以文本为准，失焦后以组件状态为准）。
+    preview_focused: bool,
+    /// 预览文本框缓冲（待保存文档；失焦时由组件状态实时重写）。
     preview_draft: String,
+    /// 最近一次文本编辑的时间点（ctx 时间），用于防抖自动保存。
+    preview_dirty_at: Option<f64>,
+    /// 最近一次文本解析是否成功（解析失败不写盘、不覆盖文本）。
+    preview_parse_ok: bool,
     load_error: Option<String>,
     pi_extras: Value,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
@@ -425,8 +429,10 @@ impl Default for App {
             show_providers_section: true,
             show_api_keys: false,
             show_preview: false,
-            preview_manual: false,
+            preview_focused: false,
             preview_draft: String::new(),
+            preview_dirty_at: None,
+            preview_parse_ok: true,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
             backend_icons: Vec::new(),
@@ -1564,12 +1570,15 @@ impl App {
                         } else {
                             "预览"
                         })
-                        .on_hover_text("在右侧打开当前页面的配置文件预览/编辑，组件改动实时同步")
+                        .on_hover_text("在右侧打开当前页面「待保存文档」预览；可直接编辑，改动实时应用并自动保存")
                         .clicked()
                 {
                     self.show_preview = !self.show_preview;
                     if self.show_preview {
-                        self.preview_manual = false;
+                        // 打开时以组件状态重建待保存文档
+                        self.preview_focused = false;
+                        self.preview_parse_ok = true;
+                        self.preview_dirty_at = None;
                     }
                 }
             });
@@ -3160,72 +3169,111 @@ impl App {
         }
     }
 
-    /// 预览面板：右侧实时展示当前页面配置的序列化文本；
-    /// 自动同步模式下组件改动实时反映；手动编辑模式可编辑并应用回组件。
+    /// 预览面板：右侧实时展示「待保存文档」（与保存按钮同路径、同合并语义）；
+    /// 文本框始终可编辑：编辑内容实时解析并应用回组件，停止输入后自动写盘。
     fn ui_preview_panel(&mut self, ui: &mut egui::Ui) {
+        let now = ui.ctx().input(|i| i.time);
+        // 待保存文档：与 page_save_path / save_backend_to 相同路径与合并逻辑。
+        let doc = self.preview_document();
         ui.horizontal(|ui| {
-            ui.strong(format!("{} 配置预览", self.current_page.label()));
-            if self.preview_manual {
-                ui.colored_label(egui::Color32::from_rgb(220, 160, 60), "手动编辑中")
-                    .on_hover_text("组件改动不会同步到此文本；点击「重新同步」恢复实时同步");
-                if ui.button("重新同步").clicked() {
-                    self.preview_manual = false;
+            ui.strong(format!("{} 待保存文档", self.current_page.label()));
+            match &doc {
+                Ok((path, _)) => {
+                    let clipped: String = path.chars().take(30).collect();
+                    let truncated = clipped.chars().count() < path.chars().count();
+                    let mut shown = clipped;
+                    if truncated {
+                        shown.push('…');
+                    }
+                    ui.label(egui::RichText::new(shown).weak().monospace())
+                        .on_hover_text(path);
                 }
-                if ui
-                    .button("应用")
-                    .on_hover_text("将编辑后的内容解析并写回左侧组件（失败会保留编辑内容）")
-                    .clicked()
-                {
-                    self.apply_preview_draft();
-                }
-            } else {
-                ui.colored_label(egui::Color32::from_rgb(90, 180, 110), "实时同步")
-                    .on_hover_text("组件改动自动反映在此预览中");
-                if ui
-                    .button("编辑")
-                    .on_hover_text("进入手动编辑模式，暂停自动同步")
-                    .clicked()
-                {
-                    self.preview_manual = true;
+                Err(e) => {
+                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), format!("生成失败：{}", e))
+                        .on_hover_text(e);
                 }
             }
         });
         ui.separator();
-        // 自动同步：每帧重新序列化当前页面配置到缓冲；失败时展示错误。
-        if !self.preview_manual {
-            match self.preview_text() {
-                Ok(text) => {
-                    self.preview_draft = text;
-                }
-                Err(e) => {
-                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), format!("预览失败：{}", e));
+        // 失焦（未在编辑）时：组件状态实时重写为待保存文档。
+        // 解析失败时保留用户文本，避免打断未完成的编辑。
+        if !self.preview_focused && self.preview_parse_ok {
+            if let Ok((_, text)) = &doc {
+                if text != &self.preview_draft {
+                    self.preview_draft = text.clone();
                 }
             }
         }
-        // 只读预览与可编辑共用同一缓冲：手动模式才允许输入。
+        // 文本框：始终可编辑；编辑中以文本为准（本帧不覆盖）。
         let edit = egui::TextEdit::multiline(&mut self.preview_draft)
             .font(egui::TextStyle::Monospace)
             .code_editor()
-            .interactive(self.preview_manual)
-            .desired_width(f32::INFINITY);
-        ui.add(edit);
+            .desired_width(f32::INFINITY)
+            .hint_text("在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存");
+        let resp = ui.add(edit);
+        self.preview_focused = resp.has_focus();
+        // 编辑 → 实时解析并应用回组件状态（解析失败不写盘、不覆盖）。
+        if resp.changed() && self.preview_focused {
+            self.apply_preview_draft();
+            self.preview_dirty_at = Some(now);
+        }
+        // 防抖自动保存：解析成功且停止输入 0.8s 后写盘。
+        if let Some(at) = self.preview_dirty_at {
+            if now - at > 0.8 {
+                self.preview_dirty_at = None;
+                self.preview_autosave();
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .button("立即保存")
+                .on_hover_text("立即将当前编辑内容写入目标文件（自动保存的立即版）")
+                .clicked()
+            {
+                self.preview_autosave();
+            }
+            if ui.button("关闭").clicked() {
+                self.show_preview = false;
+            }
+            if !self.preview_focused {
+                ui.weak("组件改动 → 文本实时同步；文本编辑 → 实时应用并自动保存");
+            } else {
+                ui.weak("编辑中：以文本为准，失焦后回到组件同步");
+            }
+        });
     }
 
-    /// 序列化当前页面配置为预览文本（与保存使用同一渲染器）。
-    fn preview_text(&self) -> Result<String, String> {
+    /// 生成当前页面「待保存文档」：目标路径 + 序列化内容。
+    /// 与保存一致：非当前文件目标先读目标文件并按目标格式合并（upsert）。
+    fn preview_document(&self) -> Result<(String, String), String> {
         let fmt = self.current_page;
         let backend = backends::backend(fmt);
+        let target = self.page_save_path(fmt);
+        let path = match &target {
+            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => {
+                p.clone()
+            }
+        };
+        let is_current = self.source_format == fmt && path == self.loaded_path;
+        let target_root = if is_current {
+            None
+        } else {
+            Some(backend.load_target_root(&path))
+        };
         let root = backend.serialize_root(
             &self.agents,
             &self.providers,
             self.extras_for(fmt),
-            None,
+            target_root.as_ref(),
         );
-        backend.render(&root, self.save_format == SaveFormat::Compact)
+        let content = backend.render(&root, self.save_format == SaveFormat::Compact)?;
+        Ok((path, content))
     }
 
-    /// 把预览编辑内容解析并写回左侧组件状态。
-    fn apply_preview_draft(&mut self) {
+    /// 把预览编辑内容解析并写回左侧组件状态；成功返回 true。
+    /// 仅更新内存状态，不落盘（落盘由自动保存/立即保存负责）。
+    fn apply_preview_draft(&mut self) -> bool {
         let fmt = self.current_page;
         let content = self.preview_draft.clone();
         match backends::backend(fmt).parse_at(&content, &self.config_path) {
@@ -3236,17 +3284,49 @@ impl App {
                 self.pi_extras = load.extras;
                 self.load_error = None;
                 self.source_format = fmt;
-                self.status = format!("已应用预览内容（{}）", fmt.label());
-                self.preview_manual = false;
+                self.preview_parse_ok = true;
                 self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
                 self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
                 self.model_fetch.clear();
                 self.model_fetch_open.clear();
                 self.latency.clear();
+                true
             }
             Err(e) => {
-                self.status = format!("预览内容解析失败：{}", e);
+                self.preview_parse_ok = false;
+                self.status = format!("预览内容解析失败：{}（继续编辑或撤销）", e);
+                false
             }
+        }
+    }
+
+    /// 实时保存：把当前待保存文档写入目标文件（仅本地，不触发 WSL 同步；
+    /// 解析失败、目标不可用时跳过并提示，绝不写坏文件）。
+    fn preview_autosave(&mut self) {
+        if !self.preview_parse_ok {
+            self.status = "预览内容解析失败，未保存（修正文本后会自动保存）".into();
+            return;
+        }
+        let fmt = self.current_page;
+        let target = self.page_save_path(fmt);
+        let path = match &target {
+            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => {
+                p.clone()
+            }
+        };
+        let usable = match &target {
+            PageTarget::Default(_) => {
+                self.targets.iter().any(|t| t.backend == fmt && t.available)
+            }
+            _ => true,
+        };
+        if !usable {
+            self.status = format!("{}: 目标不可用（{}），未实时保存——请用保存按钮", fmt.label(), path);
+            return;
+        }
+        match self.save_backend_to(fmt, &path) {
+            Ok(()) => self.status = format!("{}: 已实时保存", fmt.label()),
+            Err(e) => self.status = format!("{}: 实时保存失败({})", fmt.label(), e),
         }
     }
 
