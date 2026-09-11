@@ -65,7 +65,10 @@ fn agent_temperature_empty_removes_field() {
     let mut agent = AgentRow::from("a", &v);
     agent.temperature = String::new();
     let out = agent.to_value();
-    assert!(out.get("temperature").is_none(), "temperature should be removed when empty");
+    assert!(
+        out.get("temperature").is_none(),
+        "temperature should be removed when empty"
+    );
 }
 
 #[test]
@@ -74,7 +77,10 @@ fn agent_temperature_invalid_removes_field() {
     let mut agent = AgentRow::from("a", &v);
     agent.temperature = "abc".to_string();
     let out = agent.to_value();
-    assert!(out.get("temperature").is_none(), "temperature should be removed for invalid string");
+    assert!(
+        out.get("temperature").is_none(),
+        "temperature should be removed for invalid string"
+    );
 }
 
 #[test]
@@ -125,7 +131,10 @@ fn model_modalities_empty_removes_field() {
     model.modalities_input = String::new();
     model.modalities_output = String::new();
     let out = model.to_value();
-    assert!(out.get("modalities").is_none(), "modalities should be removed when both empty");
+    assert!(
+        out.get("modalities").is_none(),
+        "modalities should be removed when both empty"
+    );
 }
 
 #[test]
@@ -296,8 +305,14 @@ fn model_modalities_single_side_kept() {
         out.get("modalities").is_some(),
         "modalities should survive when one side is empty"
     );
-    assert!(out["modalities"].get("input").is_none(), "input subkey removed");
-    assert_eq!(out["modalities"]["output"][0], "text", "output side preserved");
+    assert!(
+        out["modalities"].get("input").is_none(),
+        "input subkey removed"
+    );
+    assert_eq!(
+        out["modalities"]["output"][0], "text",
+        "output side preserved"
+    );
 }
 
 #[test]
@@ -354,7 +369,10 @@ fn provider_options_omitted_when_empty() {
     assert_eq!(provider.timeout, "180000");
     assert_eq!(provider.original_timeout, "180000");
     let out = provider.to_value();
-    assert!(out.get("options").is_none(), "empty options must be omitted");
+    assert!(
+        out.get("options").is_none(),
+        "empty options must be omitted"
+    );
 }
 
 #[test]
@@ -407,7 +425,14 @@ fn new_model_fields_in_canonical_opencode_order() {
         .collect();
     assert_eq!(
         keys,
-        vec!["name", "modalities", "reasoning", "tool_call", "limit"],
+        vec![
+            "name",
+            "modalities",
+            "reasoning",
+            "tool_call",
+            "limit",
+            "variants"
+        ],
         "新模型键顺序应为 opencode 惯例顺序"
     );
 }

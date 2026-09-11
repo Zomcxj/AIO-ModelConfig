@@ -4,11 +4,10 @@
 //! （如 `mcp`）原样保留。
 
 use super::{Backend, BackendLoad};
+use crate::convert;
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
-use crate::util::{
-    parse_config_content, read_config_content, wsl_home, WslPathProbe,
-};
+use crate::util::{parse_config_content, read_config_content, wsl_home, WslPathProbe};
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -141,8 +140,9 @@ impl Backend for OpenCodeBackend {
 }
 
 /// 将 UI 状态合并进 opencode 目标 root（跨格式保存用）：
-/// agent / provider 以 UI 状态 upsert，目标已有同名条目被覆盖、
-/// 不同名条目保留，其余顶层字段原样保留。
+/// agent / provider 以 UI 状态 upsert，目标已有同名条目按字段保守合并
+/// （UI 提供的键覆盖，目标独有键与目标独有条目一律保留），
+/// 其余顶层字段原样保留。
 pub fn merge_opencode_root(
     target_root: &Value,
     agents: &[AgentRow],
@@ -157,7 +157,12 @@ pub fn merge_opencode_root(
             .unwrap_or_default();
         for a in agents {
             if !a.key.is_empty() {
-                am.insert(a.key.clone(), a.to_value());
+                let value = a.to_value();
+                let entry = match am.get(&a.key) {
+                    Some(target) => convert::merge_conservative(target, &value),
+                    None => value,
+                };
+                am.insert(a.key.clone(), entry);
             }
         }
         o.insert("agent".into(), Value::Object(am));
@@ -169,7 +174,12 @@ pub fn merge_opencode_root(
             .unwrap_or_default();
         for p in providers {
             if !p.key.is_empty() {
-                pm.insert(p.key.clone(), p.to_value());
+                let value = p.to_value();
+                let entry = match pm.get(&p.key) {
+                    Some(target) => convert::merge_conservative(target, &value),
+                    None => value,
+                };
+                pm.insert(p.key.clone(), entry);
             }
         }
         o.insert("provider".into(), Value::Object(pm));

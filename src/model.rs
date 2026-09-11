@@ -183,15 +183,16 @@ impl ModelRow {
         Self {
             id: String::new(),
             name: String::new(),
-            // 新增模型的缺省值：默认支持思考与工具调用，并预填常用上下文/输出上限。
+            // 新增模型的缺省值：默认支持思考与工具调用，预填常用上下文/输出上限、
+            // 输入输出模态与思考档位。
             reasoning: true,
             tool_call: true,
             store: false,
             context: "272000".into(),
             output: "128000".into(),
-            modalities_input: String::new(),
-            modalities_output: String::new(),
-            variants: String::new(),
+            modalities_input: "text, image".into(),
+            modalities_output: "text".into(),
+            variants: "medium, high, xhigh, max".into(),
             original_variants: String::new(),
             source_format: None,
             raw: Value::Object(Map::new()),

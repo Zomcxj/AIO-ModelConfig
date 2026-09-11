@@ -621,11 +621,25 @@ impl Backend for DeepSeekHarnessBackend {
             .as_object()
             .cloned()
             .unwrap_or_default();
-        let provider_values: Map<String, Value> = providers
-            .iter()
-            .filter(|p| !p.key.is_empty())
-            .map(|p| (p.key.clone(), provider_to_dsh(p)))
-            .collect();
+        // 当前文件保存以 UI 状态为准整体替换（删除即生效）；
+        // 跨格式目标保存做保守合并：同名 provider 按字段合并、目标独有 provider
+        // 保留，保证「非编辑内容不能改」。
+        let cross_format = target_root.is_some();
+        let existing = root
+            .get("llm-pi-ai")
+            .and_then(|v| v.get("providers"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut provider_values = if cross_format { existing } else { Map::new() };
+        for p in providers.iter().filter(|p| !p.key.is_empty()) {
+            let value = provider_to_dsh(p);
+            let entry = match (cross_format, provider_values.get(&p.key)) {
+                (true, Some(target)) => convert::merge_conservative(target, &value),
+                _ => value,
+            };
+            provider_values.insert(p.key.clone(), entry);
+        }
         // 不 remove + insert llm-pi-ai：serde_json preserve_order 会把重新
         // 插入的键移动到根节点末尾，导致 DSH settings 顶层顺序发生变化。
         if let Some(llm) = root.get_mut("llm-pi-ai").and_then(Value::as_object_mut) {

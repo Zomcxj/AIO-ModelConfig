@@ -297,26 +297,35 @@ impl Backend for OhMyPiBackend {
         extras: &Value,
         target_root: Option<&Value>,
     ) -> Value {
-        // 跨格式目标：extras 取目标文件自身的顶层字段，仅重写 providers
+        // 跨格式目标：extras 取目标文件自身的顶层字段，仅重写 providers。
+        // 目标已有同名 provider 时做保守合并（非编辑内容保留）；
+        // 目标独有 provider 一律保留。当前文件保存时 extras 不含 providers。
         let base = match target_root {
             Some(target) => target,
             None => extras,
         };
         let mut root = base.as_object().cloned().unwrap_or_default();
-        let providers_map: Map<String, Value> = providers
-            .iter()
-            .filter(|p| !p.key.is_empty())
-            .map(|p| (p.key.clone(), provider_to_omp(p)))
-            .collect();
+        let mut providers_map = root
+            .get("providers")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for p in providers.iter().filter(|p| !p.key.is_empty()) {
+            let value = provider_to_omp(p);
+            let entry = match providers_map.get(&p.key) {
+                Some(target) => convert::merge_conservative(target, &value),
+                None => value,
+            };
+            providers_map.insert(p.key.clone(), entry);
+        }
         root.insert("providers".into(), Value::Object(providers_map));
         Value::Object(root)
     }
 
     fn load_target_root(&self, path: &str) -> Value {
+        // 跨格式目标保存需要目标文件完整的 providers（保守合并用）。
         match read_config_content(path) {
-            Ok(content) => parse_yaml_content(&content)
-                .map(|v| convert::load_pi_extras(&v))
-                .unwrap_or(Value::Object(Map::new())),
+            Ok(content) => parse_yaml_content(&content).unwrap_or(Value::Object(Map::new())),
             Err(_) => Value::Object(Map::new()),
         }
     }

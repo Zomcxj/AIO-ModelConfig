@@ -4,7 +4,9 @@ use crate::credentials;
 use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
-use crate::ui::{card_frame, card_list, field_label, move_item, numeric_text_edit, secret_text_edit, DragHandle};
+use crate::ui::{
+    card_frame, card_list, field_label, move_item, numeric_text_edit, secret_text_edit, DragHandle,
+};
 use crate::util::{self, is_wsl_path, parse_number_text, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
@@ -3200,48 +3202,29 @@ impl App {
                 }
             }
         }
-        // 顶部：标题 + 行数/总行数（不显示路径）。
+        // 顶部：标题 + 行数/总行数（不显示路径）；格式报错直接排在行数右侧。
         let total_lines = self.preview_draft.chars().filter(|c| *c == '\n').count() + 1;
         ui.horizontal(|ui| {
             ui.strong("预览编辑");
             ui.label(
-                egui::RichText::new(format!(
-                    "{} / {} 行",
-                    self.preview_cursor_line, total_lines
-                ))
-                .small()
-                .weak(),
+                egui::RichText::new(format!("{} / {} 行", self.preview_cursor_line, total_lines))
+                    .small()
+                    .weak(),
             )
             .on_hover_text("光标所在行 / 待保存文档总行数");
-            if let Err(e) = &doc {
+            if let Some(e) = &self.preview_parse_error {
+                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), "⚠ 格式错误");
                 ui.colored_label(
-                    egui::Color32::from_rgb(220, 90, 90),
-                    "生成失败",
+                    egui::Color32::from_rgb(235, 170, 170),
+                    egui::RichText::new(e).small(),
                 )
-                .on_hover_text(e);
+                .on_hover_text("继续编辑修正，或切走再切回以撤销文本修改");
+            } else if let Err(e) = &doc {
+                ui.colored_label(egui::Color32::from_rgb(220, 90, 90), "生成失败")
+                    .on_hover_text(e);
             }
         });
         ui.separator();
-        // 预览文本解析失败：面板内红字提示（生成失败指序列化阶段，这里指解析阶段）。
-        if let Some(e) = &self.preview_parse_error {
-            egui::Frame::default()
-                .fill(egui::Color32::from_rgb(60, 20, 20))
-                .inner_margin(egui::Margin::symmetric(6, 4))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(255, 140, 140),
-                            "⚠ 格式错误",
-                        );
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 180, 180),
-                            egui::RichText::new(e).small(),
-                        )
-                        .on_hover_text("继续编辑修正，或切走再切回以撤销文本修改");
-                    });
-                });
-            ui.add_space(4.0);
-        }
         // 文本框：常规自上而下布局的最后一个元素，占满剩余高度，
         // 滚轮/滚动条均正常（用 bottom_up 会把滚动错位到底部）。
         let text_width = (ui.available_width() - 14.0).max(120.0);
@@ -3256,9 +3239,7 @@ impl App {
                     .code_editor()
                     .desired_width(text_width)
                     .desired_rows(24)
-                    .hint_text(
-                        "在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存",
-                    );
+                    .hint_text("在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存");
                 // 用 show 而非 add：需要 output.cursor_range 计算光标所在行。
                 let output = edit.show(ui);
                 let resp = output.response;
@@ -3302,9 +3283,7 @@ impl App {
         let backend = backends::backend(fmt);
         let target = self.page_save_path(fmt);
         let path = match &target {
-            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => {
-                p.clone()
-            }
+            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => p.clone(),
         };
         let is_current = self.source_format == fmt && path == self.loaded_path;
         let target_root = if is_current {
@@ -3363,18 +3342,18 @@ impl App {
         let fmt = self.current_page;
         let target = self.page_save_path(fmt);
         let path = match &target {
-            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => {
-                p.clone()
-            }
+            PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => p.clone(),
         };
         let usable = match &target {
-            PageTarget::Default(_) => {
-                self.targets.iter().any(|t| t.backend == fmt && t.available)
-            }
+            PageTarget::Default(_) => self.targets.iter().any(|t| t.backend == fmt && t.available),
             _ => true,
         };
         if !usable {
-            self.status = format!("{}: 目标不可用（{}），未实时保存——请用保存按钮", fmt.label(), path);
+            self.status = format!(
+                "{}: 目标不可用（{}），未实时保存——请用保存按钮",
+                fmt.label(),
+                path
+            );
             return;
         }
         match self.save_backend_to(fmt, &path) {
@@ -3987,7 +3966,7 @@ mod compact_tests {
 
 #[cfg(test)]
 mod model_fetch_tests {
-    use super::{parse_models_response, sanitize_network_error, App, chat_url};
+    use super::{chat_url, parse_models_response, sanitize_network_error, App};
 
     #[test]
     fn parse_openai_style_models() {

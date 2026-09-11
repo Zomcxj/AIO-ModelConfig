@@ -366,11 +366,47 @@ pub fn load_pi_extras(root: &Value) -> Value {
 
 pub fn to_pi_root(providers: &[ProviderRow], extras: &Value) -> Value {
     let mut root = extras.as_object().cloned().unwrap_or_default();
-    let providers_map: Map<String, Value> = providers
-        .iter()
-        .filter(|p| !p.key.is_empty())
-        .map(|p| (p.key.clone(), provider_to_pi(p)))
-        .collect();
+    // 跨格式目标保存时以“目标现有内容为基底”做保守合并：同名 provider 覆盖、
+    // 目标独有 provider 保留（非编辑内容不能被整文件替换删掉）。
+    // 当前文件保存时 extras 不含 providers，等价于整体替换。
+    let existing = root
+        .get("providers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut providers_map = existing;
+    for p in providers.iter().filter(|p| !p.key.is_empty()) {
+        let value = provider_to_pi(p);
+        let entry = match providers_map.get(&p.key) {
+            Some(target) => merge_conservative(target, &value),
+            None => value,
+        };
+        providers_map.insert(p.key.clone(), entry);
+    }
     root.insert("providers".into(), Value::Object(providers_map));
     Value::Object(root)
+}
+
+/// 保守合并：以 `target`（目标文件现有内容）为基底，`source`（UI 转换结果）
+/// 中存在的键覆盖对应值；target 独有的键一律保留。对象递归合并，
+/// 数组与标量在 source 有该键时以 source 为准。用于跨格式保存，
+/// 保证「非编辑内容不能改」。
+pub fn merge_conservative(target: &Value, source: &Value) -> Value {
+    match (target, source) {
+        (Value::Object(target_obj), Value::Object(source_obj)) => {
+            let mut out = target_obj.clone();
+            for (key, source_value) in source_obj {
+                match target_obj.get(key) {
+                    Some(target_value) => {
+                        out.insert(key.clone(), merge_conservative(target_value, source_value));
+                    }
+                    None => {
+                        out.insert(key.clone(), source_value.clone());
+                    }
+                };
+            }
+            Value::Object(out)
+        }
+        _ => source.clone(),
+    }
 }

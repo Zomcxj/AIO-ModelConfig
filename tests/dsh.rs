@@ -309,5 +309,32 @@ fn dsh_writes_retry_policy_before_timeout_ms() {
         .collect();
     let rp = keys.iter().position(|k| *k == "retryPolicy").unwrap();
     let tm = keys.iter().position(|k| *k == "timeoutMs").unwrap();
-    assert!(rp < tm, "retryPolicy 应排在 timeoutMs 之前，实际顺序 {keys:?}");
+    assert!(
+        rp < tm,
+        "retryPolicy 应排在 timeoutMs 之前，实际顺序 {keys:?}"
+    );
+}
+
+#[test]
+fn dsh_cross_format_preserves_target_only_provider() {
+    // 跨格式保存到 DSH 目标：目标文件独有的 provider 必须保留（非编辑内容不能改）。
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let target = json!({
+        "llm-pi-ai": {
+            "providers": {
+                "target-only": {"api": "openai-completions", "models": []}
+            }
+        }
+    });
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.dsh_retry_mode = "normal".into();
+    provider.dsh_timeout_ms = "180000".into();
+    let root = backend.serialize_root(&[], &[provider], &json!({}), Some(&target));
+    let provs = &root["llm-pi-ai"]["providers"];
+    assert_eq!(
+        provs["target-only"]["api"], "openai-completions",
+        "目标独有 provider 应保留"
+    );
+    assert!(provs.get("demo").is_some(), "来源 provider 应写入");
 }
