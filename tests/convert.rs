@@ -576,3 +576,19 @@ fn provider_to_pi_places_compat_between_api_and_models() {
         "原生 provider 的 compat 也应归位，实际 {keys:?}"
     );
 }
+
+#[test]
+fn pi_variants_written_in_canonical_order() {
+    // pi 的 thinkingLevelMap 同样按规范档位顺序写出。
+    let mut model = model_harbor::model::ModelRow::new();
+    model.id = "m".into();
+    model.variants = "max, xhigh, medium".into();
+    let out = convert::model_to_pi(&model);
+    let keys: Vec<&str> = out["thinkingLevelMap"]
+        .as_object()
+        .expect("thinkingLevelMap 应为对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["medium", "xhigh", "max"], "实际 {keys:?}");
+}

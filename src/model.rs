@@ -5,6 +5,45 @@ use crate::util::{
 };
 use serde_json::{Map, Value};
 
+/// 推理档位的规范顺序（各方言并集）：写入时按此排序，删除后重新勾选
+/// 也会回到原本位置，而不是被追加到末尾。
+const VARIANT_ORDER: &[&str] = &[
+    "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+/// 将档位名按规范顺序排列（未收录的自定义档位保持相对顺序，排在最后）。
+pub fn ordered_variants<'a, I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut list: Vec<String> = names
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    list.sort_by_key(|name| {
+        VARIANT_ORDER
+            .iter()
+            .position(|known| known == name)
+            .unwrap_or(VARIANT_ORDER.len())
+    });
+    list
+}
+
+/// 解析逗号分隔的档位文本并按规范顺序返回。
+pub fn ordered_variants_text(text: &str) -> Vec<String> {
+    ordered_variants(text.split(','))
+}
+
+/// 按规范档位顺序重建映射（键为档位名，值为该档位的映射细节）。
+pub fn order_variant_map(map: &Map<String, Value>) -> Map<String, Value> {
+    ordered_variants(map.keys().map(String::as_str))
+        .into_iter()
+        .filter_map(|key| map.get(&key).cloned().map(|value| (key, value)))
+        .collect()
+}
+
 fn changed_str(raw: &Value, key: &str, current: &str) -> bool {
     current != str_at(raw, key)
 }
@@ -348,17 +387,14 @@ impl ModelRow {
                     .and_then(Value::as_object)
                     .cloned()
                     .unwrap_or_default();
-                let variants_map: Map<String, Value> = self
-                    .variants
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
+                let variants_map: Map<String, Value> = ordered_variants_text(&self.variants)
+                    .into_iter()
                     .map(|name| {
                         let value = raw_variants
-                            .get(name)
+                            .get(&name)
                             .cloned()
                             .unwrap_or_else(|| Value::Object(Map::new()));
-                        (name.to_string(), value)
+                        (name, value)
                     })
                     .collect();
                 m.insert("variants".into(), Value::Object(variants_map));

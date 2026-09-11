@@ -162,13 +162,8 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
         obj.remove("thinkingLevelMap");
         return Value::Object(obj);
     }
-    let names: Vec<&str> = m
-        .variants
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let cur: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = crate::model::ordered_variants_text(&m.variants);
+    let cur: HashSet<String> = names.iter().cloned().collect();
     let thinking_map: Map<String, Value> =
         // 1) pi 方言原样保留：raw.thinkingLevelMap 值集合与当前选择一致
         //    （保护 {"high":"max"} 这类非对称映射的键）
@@ -179,7 +174,7 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
                 .map(|s| s.to_string())
                 .collect();
             if rm_vals == cur {
-                rm.clone()
+                crate::model::order_variant_map(rm)
             } else {
                 Map::new()
             }
@@ -197,7 +192,7 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
                 .map(|s| s.to_string())
                 .collect();
             if em_vals == cur {
-                em.clone()
+                crate::model::order_variant_map(em)
             } else {
                 Map::new()
             }
@@ -208,7 +203,7 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
     let thinking_map = if thinking_map.is_empty() {
         names
             .iter()
-            .map(|n| (n.to_string(), Value::String(n.to_string())))
+            .map(|n| (n.clone(), Value::String(n.clone())))
             .collect()
     } else {
         thinking_map

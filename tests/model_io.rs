@@ -456,3 +456,27 @@ fn existing_model_key_order_preserved_when_unmodified() {
         .collect();
     assert_eq!(keys, vec!["variants", "name", "reasoning"]);
 }
+
+#[test]
+fn model_variants_written_in_canonical_order() {
+    // 删除后再勾选不应把档位追加到末尾：写出时按规范顺序排序，
+    // 同时保留 raw 中各档位的原始映射内容。
+    let raw = json!({
+        "name": "m",
+        "variants": {"medium": {"reasoningEffort": "medium"}, "high": {}, "max": {}, "xhigh": {}}
+    });
+    let mut model = ModelRow::from("m", &raw);
+    model.variants = "max, xhigh, medium, high".into();
+    let out = model.to_value();
+    let variants = out["variants"].as_object().expect("variants 应为对象");
+    let keys: Vec<&str> = variants.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        vec!["medium", "high", "xhigh", "max"],
+        "档位应按规范顺序写出，实际 {keys:?}"
+    );
+    assert_eq!(
+        variants["medium"]["reasoningEffort"], "medium",
+        "原始档位内容应保留"
+    );
+}

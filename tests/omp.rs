@@ -355,3 +355,19 @@ fn provider_to_omp_places_compat_between_api_and_models() {
         "字段顺序应为 baseUrl → apiKey → api → compat → models，实际 {keys:?}"
     );
 }
+
+#[test]
+fn omp_variants_written_in_canonical_order() {
+    // omp 的 thinking.efforts 同样按规范档位顺序写出。
+    let mut model = model_harbor::model::ModelRow::new();
+    model.id = "m".into();
+    model.variants = "max, minimal, high".into();
+    let out = model_to_omp(&model);
+    let efforts: Vec<&str> = out["thinking"]["efforts"]
+        .as_array()
+        .expect("efforts 应为数组")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(efforts, vec!["minimal", "high", "max"], "实际 {efforts:?}");
+}

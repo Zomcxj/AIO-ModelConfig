@@ -94,12 +94,7 @@ pub fn model_to_omp(m: &ModelRow) -> Value {
 /// 2. pi 方言翻译：raw.thinkingLevelMap 值集合一致 → efforts=键集合，非对称时附 effortMap；
 /// 3. 新建对称块。
 fn omp_thinking(m: &ModelRow) -> Option<Value> {
-    let names: Vec<String> = m
-        .variants
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let names: Vec<String> = crate::model::ordered_variants_text(&m.variants);
     let cur: HashSet<String> = names.iter().cloned().collect();
     let vals_of = |o: &Map<String, Value>| -> HashSet<String> {
         o.values()
@@ -121,7 +116,7 @@ fn omp_thinking(m: &ModelRow) -> Option<Value> {
                     .unwrap_or_default()
             });
         if raw_vals == cur {
-            return Some(Value::Object(t.clone()));
+            return Some(Value::Object(crate::model::order_variant_map(t)));
         }
     }
 
@@ -131,14 +126,15 @@ fn omp_thinking(m: &ModelRow) -> Option<Value> {
         if tlm_vals == cur {
             let keys: HashSet<String> = tlm.keys().cloned().collect();
             let symmetric = keys == tlm_vals;
+            let ordered = crate::model::order_variant_map(tlm);
             let mut t = Map::new();
             t.insert("mode".into(), json!("effort"));
             t.insert(
                 "efforts".into(),
-                Value::Array(tlm.keys().map(|k| Value::String(k.clone())).collect()),
+                Value::Array(ordered.keys().map(|k| Value::String(k.clone())).collect()),
             );
             if !symmetric {
-                t.insert("effortMap".into(), Value::Object(tlm.clone()));
+                t.insert("effortMap".into(), Value::Object(ordered));
             }
             return Some(Value::Object(t));
         }

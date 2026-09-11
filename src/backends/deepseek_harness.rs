@@ -133,26 +133,20 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
     if m.variants.trim().is_empty() {
         obj.remove("reasoningEfforts");
     } else {
+        let raw_efforts = m.raw.get("reasoningEfforts").and_then(Value::as_object);
         let mut efforts = Map::new();
-        if let Some(raw) = m.raw.get("reasoningEfforts").and_then(Value::as_object) {
-            for (k, v) in raw {
-                if m.variants
-                    .split(',')
-                    .any(|name| name.trim() == v.as_str().unwrap_or(""))
-                {
-                    efforts.insert(k.clone(), v.clone());
+        // 按规范档位顺序写出；raw 中已有的映射（含非对称档位）按键原样保留。
+        for name in crate::model::ordered_variants_text(&m.variants) {
+            let existing = raw_efforts
+                .and_then(|raw| raw.iter().find(|(_, v)| v.as_str() == Some(name.as_str())));
+            match existing {
+                Some((key, value)) => {
+                    efforts.insert(key.clone(), value.clone());
+                }
+                None => {
+                    efforts.insert(name.clone(), Value::String(name));
                 }
             }
-        }
-        for name in m
-            .variants
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            efforts
-                .entry(name.to_string())
-                .or_insert_with(|| Value::String(name.to_string()));
         }
         obj.insert("reasoningEfforts".into(), Value::Object(efforts));
     }

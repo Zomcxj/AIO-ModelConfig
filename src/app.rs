@@ -2456,7 +2456,11 @@ impl App {
                                 } else {
                                     selected_variants.retain(|s| s != vn);
                                 }
-                                p.models[j].variants = selected_variants.join(", ");
+                                // 重新勾选也回到规范档位顺序，避免追加到末尾。
+                                p.models[j].variants = crate::model::ordered_variants(
+                                    selected_variants.iter().map(String::as_str),
+                                )
+                                .join(", ");
                             }
                         }
                     }
