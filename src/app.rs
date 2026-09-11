@@ -3204,16 +3204,29 @@ impl App {
                 }
             }
         }
-        // 文本框：始终可编辑；编辑中以文本为准（本帧不覆盖）。
-        let edit = egui::TextEdit::multiline(&mut self.preview_draft)
-            .font(egui::TextStyle::Monospace)
-            .code_editor()
-            .desired_width(f32::INFINITY)
-            .hint_text("在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存");
-        let resp = ui.add(edit);
-        self.preview_focused = resp.has_focus();
+        // 文本框：放在滚动区内，内容超出面板时支持滚轮与滚动条拖动。
+        let text_width = (ui.available_width() - 14.0).max(120.0);
+        let mut edited = false;
+        egui::ScrollArea::vertical()
+            .id_salt("preview_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let edit = egui::TextEdit::multiline(&mut self.preview_draft)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .desired_width(text_width)
+                    .desired_rows(24)
+                    .hint_text(
+                        "在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存",
+                    );
+                let resp = ui.add(edit);
+                self.preview_focused = resp.has_focus();
+                if resp.changed() && self.preview_focused {
+                    edited = true;
+                }
+            });
         // 编辑 → 实时解析并应用回组件状态（解析失败不写盘、不覆盖）。
-        if resp.changed() && self.preview_focused {
+        if edited {
             self.apply_preview_draft();
             self.preview_dirty_at = Some(now);
         }
