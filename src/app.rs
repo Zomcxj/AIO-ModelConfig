@@ -387,6 +387,14 @@ pub struct App {
     preview_parse_ok: bool,
     /// 最近一次预览文本解析失败的报错（成功时为 None），用于面板内红字提示。
     preview_parse_error: Option<String>,
+    /// 预览 Ctrl+F 查找：查询词、是否打开、当前命中下标。
+    preview_find: String,
+    preview_find_active: bool,
+    preview_find_index: usize,
+    /// 下一帧需要给查找框抢焦点。
+    preview_find_focus: bool,
+    /// 待跳转的命中字节偏移（Enter/按钮跳转后用光标滚动到该处）。
+    preview_find_jump: Option<usize>,
     /// 光标所在行（1-based；失焦时保留最后位置）。
     preview_cursor_line: usize,
     load_error: Option<String>,
@@ -440,6 +448,11 @@ impl Default for App {
             preview_dirty_at: None,
             preview_parse_ok: true,
             preview_parse_error: None,
+            preview_find: String::new(),
+            preview_find_active: false,
+            preview_find_index: 0,
+            preview_find_focus: false,
+            preview_find_jump: None,
             preview_cursor_line: 1,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
@@ -485,11 +498,13 @@ impl eframe::App for App {
         self.poll_latency();
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
-        // 右侧配置预览/编辑面板：在中央内容区之前挂载，宽度可拖拽调整。
+        // 右侧配置预览/编辑面板：宽度按窗口比例缩放（组件区自动占据剩余宽度）；
+        // 窄窗口下限 300px，超宽屏上限 820px，避免极端比例下无法编辑。
         if self.show_preview {
+            let screen_w = ctx.screen_rect().width();
+            let preview_w = (screen_w * 0.38).clamp(300.0, 820.0);
             egui::SidePanel::right("preview_panel")
-                .default_width(440.0)
-                .min_width(300.0)
+                .exact_width(preview_w)
                 .show(ctx, |ui| {
                     self.ui_preview_panel(ui);
                 });
@@ -1971,38 +1986,44 @@ impl App {
                                 let per_col = ids.len().div_ceil(cols);
                                 let row_h =
                                     ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                                let prev_spacing_x = ui.spacing().item_spacing.x;
-                                ui.spacing_mut().item_spacing.x = 28.0;
+                                // 注意：ScrollArea 内不能用 ui.columns —— columns 会把
+                                // 内容裁到当前可用高度，导致内容不进入滚动区、无法滚动。
+                                // 改为横向排布 + 纵向子列。
                                 egui::ScrollArea::vertical()
-                                    .id_salt("model_fetch_scroll")
+                                    .id_salt(("model_fetch_scroll", p.key.as_str()))
                                     .max_height(row_h * 22.5)
                                     .auto_shrink([false, true])
                                     .scroll_bar_visibility(
                                         egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
                                     )
                                     .show(ui, |ui| {
-                                        ui.columns(cols, |columns| {
-                                            for (ci, column) in columns.iter_mut().enumerate() {
-                                                column.set_min_width(150.0);
-                                                for id in
-                                                    ids.iter().skip(ci * per_col).take(per_col)
-                                                {
-                                                    let mut checked =
-                                                        p.models.iter().any(|m| m.id.trim() == id);
-                                                    if column.checkbox(&mut checked, id).changed()
-                                                        && checked
+                                        ui.horizontal_top(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 28.0;
+                                            for (ci, _) in (0..cols).enumerate() {
+                                                ui.vertical(|ui| {
+                                                    ui.set_min_width(150.0);
+                                                    for id in
+                                                        ids.iter().skip(ci * per_col).take(per_col)
                                                     {
-                                                        let mut row = ModelRow::new();
-                                                        row.id = id.clone();
-                                                        row.name = id.clone();
-                                                        row.source_format = Some(self.current_page);
-                                                        p.models.push(row);
+                                                        let mut checked = p
+                                                            .models
+                                                            .iter()
+                                                            .any(|m| m.id.trim() == id);
+                                                        if ui.checkbox(&mut checked, id).changed()
+                                                            && checked
+                                                        {
+                                                            let mut row = ModelRow::new();
+                                                            row.id = id.clone();
+                                                            row.name = id.clone();
+                                                            row.source_format =
+                                                                Some(self.current_page);
+                                                            p.models.push(row);
+                                                        }
                                                     }
-                                                }
+                                                });
                                             }
                                         });
                                     });
-                                ui.spacing_mut().item_spacing.x = prev_spacing_x;
                             }
                             Err(err) => {
                                 ui.label(
@@ -2562,12 +2583,11 @@ impl App {
                                         egui::RichText::new("勾选可新增未配置的模型：").weak(),
                                     );
                                     // 与 provider 表单一致：最多 5 列、高度固定 22 行、内部滚动。
+                                    // （ScrollArea 内不用 ui.columns，避免内容被裁出滚动区。）
                                     let cols = ids.len().clamp(1, 5);
                                     let per_col = ids.len().div_ceil(cols);
                                     let row_h =
                                         ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                                    let prev_spacing_x = ui.spacing().item_spacing.x;
-                                    ui.spacing_mut().item_spacing.x = 28.0;
                                     egui::ScrollArea::vertical()
                                         .id_salt("new_provider_fetch_scroll")
                                         .max_height(row_h * 22.5)
@@ -2576,34 +2596,38 @@ impl App {
                                             egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
                                         )
                                         .show(ui, |ui| {
-                                            ui.columns(cols, |columns| {
-                                                for (ci, column) in columns.iter_mut().enumerate() {
-                                                    column.set_min_width(150.0);
-                                                    for id in
-                                                        ids.iter().skip(ci * per_col).take(per_col)
-                                                    {
-                                                        let mut checked = self
-                                                            .new_provider
-                                                            .models
+                                            ui.horizontal_top(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 28.0;
+                                                for (ci, _) in (0..cols).enumerate() {
+                                                    ui.vertical(|ui| {
+                                                        ui.set_min_width(150.0);
+                                                        for id in ids
                                                             .iter()
-                                                            .any(|m| m.id.trim() == id);
-                                                        if column
-                                                            .checkbox(&mut checked, id)
-                                                            .changed()
-                                                            && checked
+                                                            .skip(ci * per_col)
+                                                            .take(per_col)
                                                         {
-                                                            let mut row = ModelRow::new();
-                                                            row.id = id.clone();
-                                                            row.name = id.clone();
-                                                            row.source_format =
-                                                                Some(self.current_page);
-                                                            self.new_provider.models.push(row);
+                                                            let mut checked = self
+                                                                .new_provider
+                                                                .models
+                                                                .iter()
+                                                                .any(|m| m.id.trim() == id);
+                                                            if ui
+                                                                .checkbox(&mut checked, id)
+                                                                .changed()
+                                                                && checked
+                                                            {
+                                                                let mut row = ModelRow::new();
+                                                                row.id = id.clone();
+                                                                row.name = id.clone();
+                                                                row.source_format =
+                                                                    Some(self.current_page);
+                                                                self.new_provider.models.push(row);
+                                                            }
                                                         }
-                                                    }
+                                                    });
                                                 }
                                             });
                                         });
-                                    ui.spacing_mut().item_spacing.x = prev_spacing_x;
                                 }
                                 Err(err) => {
                                     ui.label(
@@ -3225,11 +3249,149 @@ impl App {
             }
         });
         ui.separator();
+        // Ctrl+F：激活查找（读原始按键事件，避免被文本框消耗）。
+        let ctrl_f = ui.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::F,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.command
+                )
+            })
+        });
+        if ctrl_f {
+            self.preview_find_active = true;
+            self.preview_find_focus = true;
+        }
+        // 查找栏：Enter 下一个 / Shift+Enter 上一个 / Esc 关闭。
+        if self.preview_find_active {
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.preview_find)
+                        .hint_text("查找（Enter 下一个，Shift+Enter 上一个，Esc 关闭）")
+                        .desired_width(150.0),
+                );
+                if self.preview_find_focus {
+                    resp.request_focus();
+                    self.preview_find_focus = false;
+                }
+                let matches = find_matches(&self.preview_draft, &self.preview_find);
+                let total = matches.len();
+                if total == 0 {
+                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), "0 处");
+                } else {
+                    if self.preview_find_index >= total {
+                        self.preview_find_index = 0;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} / {}",
+                            self.preview_find_index + 1,
+                            total
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+                let mut step: i32 = 0;
+                if ui.button("⬆").clicked() {
+                    step = -1;
+                }
+                if ui.button("⬇").clicked() {
+                    step = 1;
+                }
+                if ui.button("✕").clicked() {
+                    self.preview_find_active = false;
+                    self.preview_find.clear();
+                    self.preview_find_index = 0;
+                    self.preview_find_jump = None;
+                }
+                if resp.has_focus() {
+                    let keys = ui.input(|i| {
+                        (
+                            i.key_pressed(egui::Key::Enter),
+                            i.key_pressed(egui::Key::Escape),
+                            i.modifiers.shift,
+                        )
+                    });
+                    if keys.0 {
+                        step = if keys.2 { -1 } else { 1 };
+                    }
+                    if keys.1 {
+                        self.preview_find_active = false;
+                        self.preview_find.clear();
+                        self.preview_find_index = 0;
+                        self.preview_find_jump = None;
+                    }
+                }
+                if step != 0 && total > 0 {
+                    self.preview_find_index =
+                        (self.preview_find_index as i32 + step).rem_euclid(total as i32)
+                            as usize;
+                    if let Some((start, _)) = matches.get(self.preview_find_index) {
+                        self.preview_find_jump = Some(*start);
+                    }
+                }
+            });
+        }
         // 文本框：常规自上而下布局的最后一个元素，占满剩余高度，
         // 滚轮/滚动条均正常（用 bottom_up 会把滚动错位到底部）。
         let text_width = (ui.available_width() - 14.0).max(120.0);
         let mut edited = false;
         let mut cursor_line: Option<usize> = None;
+        // 查找高亮：命中段加底色，当前命中用更亮的底色。
+        let find_query = self.preview_find.clone();
+        let find_active = self.preview_find_active && !find_query.is_empty();
+        let find_matches = if find_active {
+            find_matches(&self.preview_draft, &find_query)
+        } else {
+            Vec::new()
+        };
+        let find_current =
+            self.preview_find_index.min(find_matches.len().saturating_sub(1));
+        let find_jump = self.preview_find_jump.take();
+        let mut layouter =
+            move |ui: &egui::Ui, text: &str, _wrap_width: f32| {
+                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                let mut job = egui::text::LayoutJob::default();
+                let push =
+                    |job: &mut egui::text::LayoutJob, seg: &str, bg: Option<egui::Color32>| {
+                        job.append(
+                            seg,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: font_id.clone(),
+                                background: bg.unwrap_or(egui::Color32::TRANSPARENT),
+                                ..Default::default()
+                            },
+                        );
+                    };
+                if find_matches.is_empty() {
+                    push(&mut job, text, None);
+                } else {
+                    let mut pos = 0;
+                    for (i, &(start, end)) in find_matches.iter().enumerate() {
+                        if start > pos {
+                            push(&mut job, &text[pos..start], None);
+                        }
+                        let bg = if i == find_current {
+                            egui::Color32::from_rgb(150, 105, 25)
+                        } else {
+                            egui::Color32::from_rgb(92, 80, 28)
+                        };
+                        push(&mut job, &text[start..end], Some(bg));
+                        pos = end;
+                    }
+                    if pos < text.len() {
+                        push(&mut job, &text[pos..], None);
+                    }
+                }
+                ui.fonts(|f| f.layout_job(job))
+            };
         egui::ScrollArea::vertical()
             .id_salt("preview_scroll")
             .auto_shrink([false, false])
@@ -3239,10 +3401,22 @@ impl App {
                     .code_editor()
                     .desired_width(text_width)
                     .desired_rows(24)
-                    .hint_text("在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存");
+                    .hint_text("在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存")
+                    .layouter(&mut layouter);
                 // 用 show 而非 add：需要 output.cursor_range 计算光标所在行。
                 let output = edit.show(ui);
                 let resp = output.response;
+                // 查找命中跳转：把光标移到命中处并写回状态，滚动区随之滚动。
+                if let Some(byte) = find_jump {
+                    let bounded = byte.min(self.preview_draft.len());
+                    let char_idx = self.preview_draft[..bounded].chars().count();
+                    let mut state = output.state.clone();
+                    state.cursor.set_char_range(Some(egui::text_selection::CCursorRange::two(
+                        egui::text::CCursor::new(char_idx),
+                        egui::text::CCursor::new(char_idx),
+                    )));
+                    state.store(ui.ctx(), resp.id);
+                }
                 self.preview_focused = resp.has_focus();
                 if let Some(range) = output.cursor_range {
                     let idx = range.primary.ccursor.index;
@@ -3377,6 +3551,35 @@ enum CompactRole {
     ProviderEntry,
     ModelsContainer,
     Target,
+}
+
+/// 预览查找：大小写不敏感的字符级匹配，返回不重叠的字节区间。
+fn find_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let needle: Vec<char> = query.to_lowercase().chars().collect();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    if needle.is_empty() || chars.len() < needle.len() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= chars.len() {
+        let matched = needle
+            .iter()
+            .enumerate()
+            .all(|(k, qc)| chars[i + k].1.to_lowercase().next() == Some(*qc));
+        if matched {
+            let start = chars[i].0;
+            let last = chars[i + needle.len() - 1];
+            out.push((start, last.0 + last.1.len_utf8()));
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 pub(crate) fn compact_json(root: &Value) -> String {

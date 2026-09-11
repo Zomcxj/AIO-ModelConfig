@@ -406,6 +406,10 @@ fn new_model_writes_defaults_for_reasoning_tool_call_and_limit() {
     assert_eq!(out["tool_call"], true);
     assert_eq!(out["limit"]["context"], 272000);
     assert_eq!(out["limit"]["output"], 128000);
+    assert_eq!(
+        out["options"]["store"], false,
+        "新增模型应写出 options.store=false（与既有配置一致）"
+    );
 }
 
 #[test]
@@ -431,6 +435,7 @@ fn new_model_fields_in_canonical_opencode_order() {
             "reasoning",
             "tool_call",
             "limit",
+            "options",
             "variants"
         ],
         "新模型键顺序应为 opencode 惯例顺序"

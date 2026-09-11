@@ -236,6 +236,12 @@ impl ModelRow {
             .get("options")
             .and_then(|o| o.get("store"))
             .and_then(Value::as_bool);
+        // 新建模型（raw 为空）：与既有配置一致写出 options.store=false，
+        // 否则新增模型会缺这个字段（已有模型仍只在改动时写入，保持最小 diff）。
+        let new_model = match self.raw.as_object() {
+            Some(obj) => obj.is_empty(),
+            None => true,
+        };
         if convert_dialect || raw_store != Some(self.store) {
             if self.store {
                 let mut options = m
@@ -244,6 +250,10 @@ impl ModelRow {
                     .cloned()
                     .unwrap_or_default();
                 options.insert("store".into(), true.into());
+                m.insert("options".into(), Value::Object(options));
+            } else if new_model && !convert_dialect {
+                let mut options = Map::new();
+                options.insert("store".into(), Value::Bool(false));
                 m.insert("options".into(), Value::Object(options));
             } else if let Some(options) = m.get_mut("options").and_then(Value::as_object_mut) {
                 options.remove("store");
