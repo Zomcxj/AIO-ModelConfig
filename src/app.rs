@@ -3207,57 +3207,22 @@ impl App {
                 }
             }
         }
-        // 自下而上布局：先排底部（行数、按钮），文本区占满剩余空间，
+        // 自下而上布局：先排底部（行数），文本区占满剩余空间，
         // 避免 ScrollArea::auto_shrink([false,false]) 吃满高度把底部行挤出可视区。
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button("立即保存")
-                    .on_hover_text("立即将当前编辑内容写入目标文件（自动保存的立即版）")
-                    .clicked()
-                {
-                    self.preview_autosave();
-                }
-                if ui.button("关闭").clicked() {
-                    self.show_preview = false;
-                }
-                if !self.preview_focused {
-                    ui.weak("组件改动 → 文本实时同步；文本编辑 → 实时应用并自动保存");
-                } else {
-                    ui.weak("编辑中：以文本为准，失焦后回到组件同步");
-                }
-            });
-            // 总行数 + 光标所在行（失焦时保留最后位置，弱化显示）。
+            // 单个行数显示：光标所在行 / 总行数（保存为实时自动，无需按钮）。
             let total_lines =
                 self.preview_draft.chars().filter(|c| *c == '\n').count() + 1;
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("共 {} 行", total_lines))
-                        .small()
-                        .weak(),
+                    egui::RichText::new(format!(
+                        "第 {} / {} 行",
+                        self.preview_cursor_line, total_lines
+                    ))
+                    .small()
+                    .weak(),
                 )
-                .on_hover_text("当前待保存文档的总行数");
-                if self.preview_focused {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "第 {} 行",
-                            self.preview_cursor_line
-                        ))
-                        .small()
-                        .color(egui::Color32::from_rgb(120, 170, 240)),
-                    )
-                    .on_hover_text("光标所在行");
-                } else {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "第 {} 行（未编辑）",
-                            self.preview_cursor_line
-                        ))
-                        .small()
-                        .weak(),
-                    )
-                    .on_hover_text("上次光标所在行");
-                }
+                .on_hover_text("光标所在行 / 待保存文档总行数");
             });
             ui.separator();
             // 文本框：占满剩余高度，内容超出时支持滚轮与滚动条拖动。
