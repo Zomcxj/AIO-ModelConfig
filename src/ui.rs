@@ -23,7 +23,7 @@ pub fn card_frame<R>(
         .stroke(egui::Stroke::new(stroke_width, stroke_color))
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 2.0);
+            ui.style_mut().spacing.item_spacing = egui::vec2(6.0, 2.0);
             add(ui);
         })
         .response

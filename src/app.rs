@@ -373,6 +373,12 @@ pub struct App {
     show_providers_section: bool,
     /// 全局 API Key 显隐：一键控制所有密钥输入框的明文/掩码显示。
     show_api_keys: bool,
+    /// 右侧配置预览/编辑面板是否打开。
+    show_preview: bool,
+    /// 预览进入手动编辑后停止自动同步（false = 实时同步组件改动）。
+    preview_manual: bool,
+    /// 预览文本框缓冲（自动同步时每帧重写）。
+    preview_draft: String,
     load_error: Option<String>,
     pi_extras: Value,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
@@ -418,6 +424,9 @@ impl Default for App {
             show_agents_section: true,
             show_providers_section: true,
             show_api_keys: false,
+            show_preview: false,
+            preview_manual: false,
+            preview_draft: String::new(),
             load_error: None,
             pi_extras: Value::Object(Map::new()),
             backend_icons: Vec::new(),
@@ -462,6 +471,15 @@ impl eframe::App for App {
         self.poll_latency();
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
+        // 右侧配置预览/编辑面板：在中央内容区之前挂载，宽度可拖拽调整。
+        if self.show_preview {
+            egui::SidePanel::right("preview_panel")
+                .default_width(440.0)
+                .min_width(300.0)
+                .show(ctx, |ui| {
+                    self.ui_preview_panel(ui);
+                });
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ui_page_header(ui);
             egui::ScrollArea::vertical()
@@ -1537,6 +1555,22 @@ impl App {
                         .clicked()
                 {
                     self.show_api_keys = !self.show_api_keys;
+                }
+                // 配置预览：右侧面板实时展示当前页面的序列化内容，可编辑并应用回组件。
+                if self.show_providers_section
+                    && ui
+                        .button(if self.show_preview {
+                            "关闭预览"
+                        } else {
+                            "预览"
+                        })
+                        .on_hover_text("在右侧打开当前页面的配置文件预览/编辑，组件改动实时同步")
+                        .clicked()
+                {
+                    self.show_preview = !self.show_preview;
+                    if self.show_preview {
+                        self.preview_manual = false;
+                    }
                 }
             });
         });
@@ -3123,6 +3157,96 @@ impl App {
             // pi 系（pi-agent / oh-my-pi）共用 extras 载体：providers 之外的顶层字段
             ConfigFormat::PiAgent | ConfigFormat::OhMyPi => &self.pi_extras,
             ConfigFormat::DeepSeekHarness => &self.root,
+        }
+    }
+
+    /// 预览面板：右侧实时展示当前页面配置的序列化文本；
+    /// 自动同步模式下组件改动实时反映；手动编辑模式可编辑并应用回组件。
+    fn ui_preview_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong(format!("{} 配置预览", self.current_page.label()));
+            if self.preview_manual {
+                ui.colored_label(egui::Color32::from_rgb(220, 160, 60), "手动编辑中")
+                    .on_hover_text("组件改动不会同步到此文本；点击「重新同步」恢复实时同步");
+                if ui.button("重新同步").clicked() {
+                    self.preview_manual = false;
+                }
+                if ui
+                    .button("应用")
+                    .on_hover_text("将编辑后的内容解析并写回左侧组件（失败会保留编辑内容）")
+                    .clicked()
+                {
+                    self.apply_preview_draft();
+                }
+            } else {
+                ui.colored_label(egui::Color32::from_rgb(90, 180, 110), "实时同步")
+                    .on_hover_text("组件改动自动反映在此预览中");
+                if ui
+                    .button("编辑")
+                    .on_hover_text("进入手动编辑模式，暂停自动同步")
+                    .clicked()
+                {
+                    self.preview_manual = true;
+                }
+            }
+        });
+        ui.separator();
+        // 自动同步：每帧重新序列化当前页面配置到缓冲；失败时展示错误。
+        if !self.preview_manual {
+            match self.preview_text() {
+                Ok(text) => {
+                    self.preview_draft = text;
+                }
+                Err(e) => {
+                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), format!("预览失败：{}", e));
+                }
+            }
+        }
+        // 只读预览与可编辑共用同一缓冲：手动模式才允许输入。
+        let edit = egui::TextEdit::multiline(&mut self.preview_draft)
+            .font(egui::TextStyle::Monospace)
+            .code_editor()
+            .interactive(self.preview_manual)
+            .desired_width(f32::INFINITY);
+        ui.add(edit);
+    }
+
+    /// 序列化当前页面配置为预览文本（与保存使用同一渲染器）。
+    fn preview_text(&self) -> Result<String, String> {
+        let fmt = self.current_page;
+        let backend = backends::backend(fmt);
+        let root = backend.serialize_root(
+            &self.agents,
+            &self.providers,
+            self.extras_for(fmt),
+            None,
+        );
+        backend.render(&root, self.save_format == SaveFormat::Compact)
+    }
+
+    /// 把预览编辑内容解析并写回左侧组件状态。
+    fn apply_preview_draft(&mut self) {
+        let fmt = self.current_page;
+        let content = self.preview_draft.clone();
+        match backends::backend(fmt).parse_at(&content, &self.config_path) {
+            Ok(load) => {
+                self.root = load.root;
+                self.agents = load.agents;
+                self.providers = load.providers;
+                self.pi_extras = load.extras;
+                self.load_error = None;
+                self.source_format = fmt;
+                self.status = format!("已应用预览内容（{}）", fmt.label());
+                self.preview_manual = false;
+                self.agent_open = self.agents.iter().map(|a| a.key.clone()).collect();
+                self.provider_open = self.providers.iter().map(|p| p.key.clone()).collect();
+                self.model_fetch.clear();
+                self.model_fetch_open.clear();
+                self.latency.clear();
+            }
+            Err(e) => {
+                self.status = format!("预览内容解析失败：{}", e);
+            }
         }
     }
 
