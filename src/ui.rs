@@ -92,29 +92,21 @@ pub fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     items.insert(to, item);
 }
 
-/// 密钥输入框 + 一键显示/隐藏切换按钮。掩码状态下输入内容仍保留，仅显示为圆点。
+/// 密钥输入框：`show` 为 false 时掩码显示（圆点），内容仍保留。
+/// 显隐切换由工具栏「显示密钥/隐藏密钥」全局按钮控制。
 pub fn secret_text_edit(
     ui: &mut egui::Ui,
     value: &mut String,
-    show: &mut bool,
+    show: bool,
     width: f32,
     hint: &str,
 ) -> egui::Response {
-    let edit = egui::TextEdit::singleline(value)
-        .password(!*show)
-        .desired_width(width)
-        .hint_text(hint);
-    let resp = ui.add(edit);
-    let label = if *show { "隐藏" } else { "显示" };
-    ui.button(label)
-        .on_hover_text(if *show {
-            "点击掩码密钥，隐藏明文"
-        } else {
-            "点击显示密钥明文（注意防窥）"
-        })
-        .clicked()
-        .then(|| *show = !*show);
-    resp
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .password(!show)
+            .desired_width(width)
+            .hint_text(hint),
+    )
 }
 
 /// 数字文本编辑框：内容非空且无法解析为数字时红色高亮并悬停提示。

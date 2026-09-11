@@ -371,6 +371,8 @@ pub struct App {
     sync_wsl: bool,
     show_agents_section: bool,
     show_providers_section: bool,
+    /// 全局 API Key 显隐：一键控制所有密钥输入框的明文/掩码显示。
+    show_api_keys: bool,
     load_error: Option<String>,
     pi_extras: Value,
     /// 各后端官方图标纹理（与 BACKENDS 顺序对齐，首帧惰性加载）。
@@ -415,6 +417,7 @@ impl Default for App {
             sync_wsl: false,
             show_agents_section: true,
             show_providers_section: true,
+            show_api_keys: false,
             load_error: None,
             pi_extras: Value::Object(Map::new()),
             backend_icons: Vec::new(),
@@ -1517,6 +1520,24 @@ impl App {
                     }
                     self.status = format!("已开始连通性测试（{} 个厂商）", count);
                 }
+                // 全局 API Key 显示/隐藏：一键切换全部密钥的明文/掩码。
+                // 文案带「密钥」二字，与区块「隐藏/展开」、卡片 ▼/▶ 折叠按钮明确区分。
+                if self.show_providers_section
+                    && ui
+                        .button(if self.show_api_keys {
+                            "隐藏密钥"
+                        } else {
+                            "显示密钥"
+                        })
+                        .on_hover_text(if self.show_api_keys {
+                            "点击掩码全部 API Key（默认状态）"
+                        } else {
+                            "点击显示全部 API Key 明文（注意防窥）"
+                        })
+                        .clicked()
+                {
+                    self.show_api_keys = !self.show_api_keys;
+                }
             });
         });
     }
@@ -1781,9 +1802,9 @@ impl App {
             if show_dsh {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key_env).desired_width(192.0));
                 field_label(ui, 120.0, "API Key");
-                secret_text_edit(ui, &mut p.api_key_secret, &mut p.show_api_key, 408.0, "");
+                secret_text_edit(ui, &mut p.api_key_secret, self.show_api_keys, 408.0, "");
             } else {
-                secret_text_edit(ui, &mut p.api_key, &mut p.show_api_key, 408.0, "");
+                secret_text_edit(ui, &mut p.api_key, self.show_api_keys, 408.0, "");
             }
             if show_oc && show_provider_timeout {
                 field_label(ui, 120.0, timeout_label);
@@ -2377,7 +2398,7 @@ impl App {
                     secret_text_edit(
                         ui,
                         &mut self.new_provider.api_key_secret,
-                        &mut self.new_provider.show_api_key,
+                        self.show_api_keys,
                         408.0,
                         "实际密钥",
                     );
@@ -2385,7 +2406,7 @@ impl App {
                     secret_text_edit(
                         ui,
                         &mut self.new_provider.api_key,
-                        &mut self.new_provider.show_api_key,
+                        self.show_api_keys,
                         408.0,
                         "sk-xxx",
                     );

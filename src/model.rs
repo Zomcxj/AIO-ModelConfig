@@ -397,8 +397,6 @@ pub struct ProviderRow {
     pub source_format: Option<ConfigFormat>,
     pub raw: Value,
     pub pi_api: String,
-    /// 仅 UI 状态：密钥输入框是否显示明文（默认掩码，一键切换）。
-    pub show_api_key: bool,
 }
 
 impl Default for ProviderRow {
@@ -468,7 +466,6 @@ impl ProviderRow {
             source_format: Some(ConfigFormat::Opencode),
             raw: v.clone(),
             pi_api: String::new(),
-            show_api_key: false,
         }
     }
 
@@ -500,7 +497,6 @@ impl ProviderRow {
             source_format: None,
             raw: Value::Object(Map::new()),
             pi_api: String::new(),
-            show_api_key: false,
         }
     }
 
