@@ -92,8 +92,8 @@ fn short_err(err: &str) -> String {
         format!("HTTP {}", code)
     } else {
         let t = err.trim();
-        if t.chars().count() > 24 {
-            let mut s: String = t.chars().take(24).collect();
+        if t.chars().count() > 96 {
+            let mut s: String = t.chars().take(96).collect();
             s.push('…');
             s
         } else {
@@ -115,6 +115,270 @@ fn sanitize_network_error(text: &str) -> String {
         format!("{}{}\"", head, &url[..cut])
     } else {
         text.to_string()
+    }
+}
+
+// ---------- 预览语法高亮（VSCode Dark+ 配色） ----------
+
+/// 预览文本语法：opencode 页面为 JSON(C)，pi / omp / DSH 为 YAML。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreviewSyntax {
+    Json,
+    Yaml,
+}
+
+const SYN_KEY: egui::Color32 = egui::Color32::from_rgb(0x9C, 0xDC, 0xFE);
+const SYN_STRING: egui::Color32 = egui::Color32::from_rgb(0xCE, 0x91, 0x78);
+const SYN_NUMBER: egui::Color32 = egui::Color32::from_rgb(0xB5, 0xCE, 0xA8);
+const SYN_LITERAL: egui::Color32 = egui::Color32::from_rgb(0x56, 0x9C, 0xD6);
+const SYN_COMMENT: egui::Color32 = egui::Color32::from_rgb(0x6A, 0x99, 0x55);
+const SYN_PUNCT: egui::Color32 = egui::Color32::from_rgb(0xD4, 0xD4, 0xD4);
+
+/// 按语法扫描文本，返回 `(字节起, 字节止, 颜色)` 段落（边界均在字符边界上）。
+fn syntax_tokens(text: &str, syntax: PreviewSyntax) -> Vec<(usize, usize, egui::Color32)> {
+    match syntax {
+        PreviewSyntax::Json => json_tokens(text),
+        PreviewSyntax::Yaml => yaml_tokens(text),
+    }
+}
+
+/// JSON / JSONC：字符串（键与值分开着色）、注释、数字、字面量、标点。
+fn json_tokens(text: &str) -> Vec<(usize, usize, egui::Color32)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < b.len() {
+                    match b[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                let end = i.min(b.len());
+                // 后面紧跟冒号则为对象键（VSCode Dark+ 用不同颜色）。
+                let mut j = end;
+                while j < b.len() && (b[j] as char).is_ascii_whitespace() {
+                    j += 1;
+                }
+                let color = if j < b.len() && b[j] == b':' {
+                    SYN_KEY
+                } else {
+                    SYN_STRING
+                };
+                out.push((start, end, color));
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                let start = i;
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                out.push((start, i, SYN_COMMENT));
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let start = i;
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+                out.push((start, i, SYN_COMMENT));
+            }
+            c if c == b'-' || c.is_ascii_digit() => {
+                let start = i;
+                if b[i] == b'-' {
+                    i += 1;
+                }
+                while i < b.len()
+                    && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+                {
+                    i += 1;
+                }
+                out.push((start, i, SYN_NUMBER));
+            }
+            c if c.is_ascii_alphabetic() => {
+                let rest = &text[i..];
+                let mut hit = None;
+                for lit in ["true", "false", "null"] {
+                    if rest.starts_with(lit) {
+                        hit = Some(lit.len());
+                        break;
+                    }
+                }
+                match hit {
+                    Some(len) => {
+                        out.push((i, i + len, SYN_LITERAL));
+                        i += len;
+                    }
+                    None => i += 1,
+                }
+            }
+            b'{' | b'}' | b'[' | b']' | b',' | b':' => {
+                out.push((i, i + 1, SYN_PUNCT));
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// YAML：注释、`---` 文档标记、列表项、键、引号/裸标量、数字、布尔。
+fn yaml_tokens(text: &str) -> Vec<(usize, usize, egui::Color32)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut line_start = 0;
+    while line_start <= b.len() {
+        let line_end = b[line_start..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map(|p| line_start + p)
+            .unwrap_or(b.len());
+        let mut i = line_start;
+        while i < line_end && (b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+        if line_end.saturating_sub(i) >= 3 && (b[i..i + 3] == *b"---" || b[i..i + 3] == *b"...") {
+            out.push((i, i + 3, SYN_PUNCT));
+            i += 3;
+        } else if i < line_end && b[i] != b'#' {
+            // 列表项 "- "
+            if b[i] == b'-' && (i + 1 >= line_end || b[i + 1] == b' ' || b[i + 1] == b'\t') {
+                out.push((i, i + 1, SYN_PUNCT));
+                i += 1;
+            }
+            // 键：到 ':' 为止（行内 '#' 起为注释）
+            let mut j = i;
+            let mut colon = None;
+            while j < line_end {
+                if b[j] == b'#' && (j == i || b[j - 1] == b' ' || b[j - 1] == b'\t') {
+                    break;
+                }
+                if b[j] == b':' {
+                    colon = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(c) = colon {
+                if c > i {
+                    out.push((i, c, SYN_KEY));
+                }
+                out.push((c, c + 1, SYN_PUNCT));
+                i = c + 1;
+            }
+        }
+        // 值 / 注释扫描到行尾
+        while i < line_end {
+            match b[i] {
+                b' ' | b'\t' => i += 1,
+                b'#' => {
+                    out.push((i, line_end, SYN_COMMENT));
+                    i = line_end;
+                }
+                q @ (b'"' | b'\'') => {
+                    let start = i;
+                    i += 1;
+                    while i < line_end {
+                        if q == b'"' && b[i] == b'\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == q {
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    out.push((start, i.min(line_end), SYN_STRING));
+                }
+                c if c == b'-' || c.is_ascii_digit() => {
+                    let start = i;
+                    if b[i] == b'-' {
+                        i += 1;
+                    }
+                    while i < line_end
+                        && (b[i].is_ascii_digit()
+                            || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+                    {
+                        i += 1;
+                    }
+                    out.push((start, i, SYN_NUMBER));
+                }
+                _ => {
+                    let start = i;
+                    while i < line_end {
+                        if b[i] == b'#' && i > line_start && b[i - 1] == b' ' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    let color = match text[start..i].trim_end() {
+                        "true" | "false" | "null" | "~" | "yes" | "no" | "on" | "off" => {
+                            SYN_LITERAL
+                        }
+                        _ => SYN_STRING,
+                    };
+                    out.push((start, i, color));
+                }
+            }
+        }
+        if line_end >= b.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    out
+}
+
+/// 把查找命中的底色叠加到已按语法着色的 LayoutJob 上（按 section 拆分，保留前景色）。
+fn apply_find_background(
+    job: &mut egui::text::LayoutJob,
+    matches: &[(usize, usize)],
+    current: usize,
+) {
+    for (i, &(start, end)) in matches.iter().enumerate() {
+        if start >= end {
+            continue;
+        }
+        let bg = if i == current {
+            egui::Color32::from_rgb(150, 105, 25)
+        } else {
+            egui::Color32::from_rgb(92, 80, 28)
+        };
+        let mut out = Vec::with_capacity(job.sections.len() + 2);
+        for section in job.sections.drain(..) {
+            let (s, e) = (section.byte_range.start, section.byte_range.end);
+            let (is, ie) = (start.max(s), end.min(e));
+            if is >= ie {
+                out.push(section);
+                continue;
+            }
+            if s < is {
+                let mut pre = section.clone();
+                pre.byte_range = s..is;
+                out.push(pre);
+            }
+            let mut mid = section.clone();
+            mid.byte_range = is..ie;
+            mid.leading_space = 0.0;
+            mid.format.background = bg;
+            out.push(mid);
+            if ie < e {
+                let mut post = section;
+                post.byte_range = ie..e;
+                post.leading_space = 0.0;
+                out.push(post);
+            }
+        }
+        job.sections = out;
     }
 }
 
@@ -377,6 +641,8 @@ pub struct App {
     show_api_keys: bool,
     /// 右侧配置预览/编辑面板是否打开。
     show_preview: bool,
+    /// 预览面板宽度占窗口宽度的比例（拖动分隔条调整；窗口缩放时按此比例适配）。
+    preview_ratio: f32,
     /// 预览文本框是否持有焦点（编辑中以文本为准，失焦后以组件状态为准）。
     preview_focused: bool,
     /// 预览文本框缓冲（待保存文档；失焦时由组件状态实时重写）。
@@ -443,6 +709,7 @@ impl Default for App {
             show_providers_section: true,
             show_api_keys: false,
             show_preview: false,
+            preview_ratio: 0.38,
             preview_focused: false,
             preview_draft: String::new(),
             preview_dirty_at: None,
@@ -498,16 +765,19 @@ impl eframe::App for App {
         self.poll_latency();
         self.ui_top_bar(ctx);
         self.ui_status_bar(ctx);
-        // 右侧配置预览/编辑面板：宽度按窗口比例缩放（组件区自动占据剩余宽度）；
-        // 窄窗口下限 300px，超宽屏上限 820px，避免极端比例下无法编辑。
+        // 右侧配置预览/编辑面板：宽度由 preview_ratio 控制（拖动左边缘分隔条调整），
+        // 窗口缩放时按该比例适配；窄窗口下限 220px，并保证组件区至少 320px。
         if self.show_preview {
-            let screen_w = ctx.screen_rect().width();
-            let preview_w = (screen_w * 0.38).clamp(300.0, 820.0);
-            egui::SidePanel::right("preview_panel")
+            let screen_w = ctx.screen_rect().width().max(1.0);
+            let max_w = (screen_w - 320.0).max(220.0);
+            let preview_w = (screen_w * self.preview_ratio).clamp(220.0, max_w);
+            let side = egui::SidePanel::right("preview_panel")
                 .exact_width(preview_w)
                 .show(ctx, |ui| {
                     self.ui_preview_panel(ui);
                 });
+            // 分隔条用 Foreground 层的独立热区：同层注册会被占满面板的文本框抢走拖拽。
+            self.ui_preview_resizer(ctx, side.response.rect, screen_w);
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ui_page_header(ui);
@@ -747,7 +1017,8 @@ impl App {
         egui::TopBottomPanel::bottom("bottom")
             .exact_height(32.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                // 底部文字：靠下（不垂直居中）且左对齐，右侧统计仍靠右。
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::BOTTOM), |ui| {
                     if let Some(err) = &self.load_error {
                         ui.label(
                             egui::RichText::new(format!("⚠ 加载失败: {}", err))
@@ -756,7 +1027,7 @@ impl App {
                     }
                     ui.label(egui::RichText::new(&self.status).weak());
                     // 右侧：当前页 + 数量统计，随时可见页面身份
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                         ui.label(
                             egui::RichText::new(format!(
                                 "agents: {} | providers: {}",
@@ -1163,7 +1434,7 @@ impl App {
                         .is_some(),
                     _ => false,
                 },
-                ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
+                ConfigFormat::Pi | ConfigFormat::OhMyPi => match field {
                     "base_url" => provider.raw.get("baseUrl").is_some(),
                     _ => false,
                 },
@@ -1209,7 +1480,7 @@ impl App {
                     "variants" => model.raw.get("variants").is_some(),
                     _ => false,
                 },
-                ConfigFormat::PiAgent | ConfigFormat::OhMyPi => match field {
+                ConfigFormat::Pi | ConfigFormat::OhMyPi => match field {
                     "name" => model.raw.get("name").is_some(),
                     // reasoning 也可由 pi/omp 的 thinking 块 / thinkingLevelMap 表达，
                     // 只写了这些键时同样应显示（并勾选）reasoning。
@@ -1459,7 +1730,7 @@ impl App {
                 "variants",
                 &["none", "low", "medium", "high", "xhigh", "max", "ultra"],
             ),
-            ConfigFormat::PiAgent => (
+            ConfigFormat::Pi => (
                 "thinkingLevelMap",
                 &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
             ),
@@ -1850,6 +2121,15 @@ impl App {
                         }
                     });
             }
+            // timeout / timeoutMs 与 npm/api 同排（第一行）。
+            if show_oc && show_provider_timeout {
+                field_label(ui, 120.0, timeout_label);
+                numeric_text_edit(ui, &mut p.timeout, 70.0, "180000");
+            }
+            if show_dsh_retry {
+                field_label(ui, 120.0, "timeoutMs");
+                numeric_text_edit(ui, &mut p.dsh_timeout_ms, 70.0, "180000");
+            }
             // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
             if !show_oc && !show_dsh {
                 field_label(ui, 120.0, "compat");
@@ -1881,14 +2161,6 @@ impl App {
                 secret_text_edit(ui, &mut p.api_key_secret, self.show_api_keys, 408.0, "");
             } else {
                 secret_text_edit(ui, &mut p.api_key, self.show_api_keys, 408.0, "");
-            }
-            if show_oc && show_provider_timeout {
-                field_label(ui, 120.0, timeout_label);
-                numeric_text_edit(ui, &mut p.timeout, 70.0, "180000");
-            }
-            if show_dsh_retry {
-                field_label(ui, 120.0, "timeoutMs");
-                numeric_text_edit(ui, &mut p.dsh_timeout_ms, 70.0, "180000");
             }
         });
 
@@ -2447,6 +2719,11 @@ impl App {
                             }
                         });
                 }
+                // timeout 与 npm/api 同排（第一行）。
+                if show_oc {
+                    field_label(ui, 120.0, timeout_label);
+                    numeric_text_edit(ui, &mut self.new_provider.timeout, 70.0, "180000");
+                }
                 // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
                 if !show_oc && !show_dsh {
                     field_label(ui, 120.0, "compat");
@@ -2492,10 +2769,6 @@ impl App {
                         408.0,
                         "sk-xxx",
                     );
-                }
-                if show_oc {
-                    field_label(ui, 120.0, timeout_label);
-                    numeric_text_edit(ui, &mut self.new_provider.timeout, 70.0, "180000");
                 }
             });
             ui.add_space(6.0);
@@ -3205,9 +3478,64 @@ impl App {
     fn extras_for(&self, fmt: ConfigFormat) -> &Value {
         match fmt {
             ConfigFormat::Opencode => &self.root,
-            // pi 系（pi-agent / oh-my-pi）共用 extras 载体：providers 之外的顶层字段
-            ConfigFormat::PiAgent | ConfigFormat::OhMyPi => &self.pi_extras,
+            // pi 系（pi / oh-my-pi）共用 extras 载体：providers 之外的顶层字段
+            ConfigFormat::Pi | ConfigFormat::OhMyPi => &self.pi_extras,
             ConfigFormat::DeepSeekHarness => &self.root,
+        }
+    }
+
+    /// 预览面板左边缘的拖动分隔条：拖拽调整预览宽度比例（窗口缩放时按比例适配）。
+    /// 用 Foreground 层的 Area 承载热区，避免被同层的文本框/滚动区抢走拖拽。
+    fn ui_preview_resizer(&mut self, ctx: &egui::Context, panel_rect: egui::Rect, screen_w: f32) {
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(panel_rect.left() - 4.0, panel_rect.top()),
+            egui::pos2(panel_rect.left() + 4.0, panel_rect.bottom()),
+        );
+        let resp = egui::Area::new(egui::Id::new("preview_resizer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(strip.min)
+            .show(ctx, |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(strip.size(), egui::Sense::click_and_drag());
+                let active = resp.hovered() || resp.dragged();
+                if active {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                let color = if active {
+                    ui.visuals().widgets.hovered.bg_stroke.color
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke.color
+                };
+                ui.painter().vline(
+                    rect.center().x,
+                    rect.y_range(),
+                    egui::Stroke::new(1.0, color),
+                );
+                resp
+            })
+            .inner;
+        if resp.dragged() {
+            // 分隔条向右拖 → 预览变窄 → 比例减小。
+            let dx = resp.drag_delta().x;
+            self.preview_ratio = (self.preview_ratio - dx / screen_w.max(1.0)).clamp(0.15, 0.85);
+        }
+    }
+
+    /// 预览文本语法：opencode / pi 为 JSON(C)，omp / DSH 为 YAML；
+    /// 另按内容首字符兜底（`{` / `[` 视为 JSON），避免格式与页面不匹配时高亮错乱。
+    fn preview_syntax(&self, text: &str) -> PreviewSyntax {
+        // 内容兜底：以 `{` / `[` 开头一律按 JSON 处理（例如误把 JSON 当 YAML 页面导入）。
+        if matches!(
+            text.trim_start().as_bytes().first(),
+            Some(b'{') | Some(b'[')
+        ) {
+            return PreviewSyntax::Json;
+        }
+        // opencode: opencode.json(c) / pi: ~/.pi/agent/models.json（JSONC）
+        // omp: models.yml / DSH: settings.yaml（YAML）
+        match self.current_page {
+            ConfigFormat::Opencode | ConfigFormat::Pi => PreviewSyntax::Json,
+            ConfigFormat::OhMyPi | ConfigFormat::DeepSeekHarness => PreviewSyntax::Yaml,
         }
     }
 
@@ -3238,9 +3566,13 @@ impl App {
             .on_hover_text("光标所在行 / 待保存文档总行数");
             if let Some(e) = &self.preview_parse_error {
                 ui.colored_label(egui::Color32::from_rgb(255, 120, 120), "⚠ 格式错误");
-                ui.colored_label(
-                    egui::Color32::from_rgb(235, 170, 170),
-                    egui::RichText::new(e).small(),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(e)
+                            .small()
+                            .color(egui::Color32::from_rgb(235, 170, 170)),
+                    )
+                    .wrap(),
                 )
                 .on_hover_text("继续编辑修正，或切走再切回以撤销文本修改");
             } else if let Err(e) = &doc {
@@ -3288,13 +3620,9 @@ impl App {
                         self.preview_find_index = 0;
                     }
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{} / {}",
-                            self.preview_find_index + 1,
-                            total
-                        ))
-                        .small()
-                        .weak(),
+                        egui::RichText::new(format!("{} / {}", self.preview_find_index + 1, total))
+                            .small()
+                            .weak(),
                     );
                 }
                 let mut step: i32 = 0;
@@ -3330,8 +3658,7 @@ impl App {
                 }
                 if step != 0 && total > 0 {
                     self.preview_find_index =
-                        (self.preview_find_index as i32 + step).rem_euclid(total as i32)
-                            as usize;
+                        (self.preview_find_index as i32 + step).rem_euclid(total as i32) as usize;
                     if let Some((start, _)) = matches.get(self.preview_find_index) {
                         self.preview_find_jump = Some(*start);
                     }
@@ -3351,47 +3678,48 @@ impl App {
         } else {
             Vec::new()
         };
-        let find_current =
-            self.preview_find_index.min(find_matches.len().saturating_sub(1));
+        let find_current = self
+            .preview_find_index
+            .min(find_matches.len().saturating_sub(1));
         let find_jump = self.preview_find_jump.take();
-        let mut layouter =
-            move |ui: &egui::Ui, text: &str, _wrap_width: f32| {
-                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-                let mut job = egui::text::LayoutJob::default();
-                let push =
-                    |job: &mut egui::text::LayoutJob, seg: &str, bg: Option<egui::Color32>| {
-                        job.append(
-                            seg,
-                            0.0,
-                            egui::TextFormat {
-                                font_id: font_id.clone(),
-                                background: bg.unwrap_or(egui::Color32::TRANSPARENT),
-                                ..Default::default()
-                            },
-                        );
-                    };
-                if find_matches.is_empty() {
-                    push(&mut job, text, None);
-                } else {
-                    let mut pos = 0;
-                    for (i, &(start, end)) in find_matches.iter().enumerate() {
-                        if start > pos {
-                            push(&mut job, &text[pos..start], None);
-                        }
-                        let bg = if i == find_current {
-                            egui::Color32::from_rgb(150, 105, 25)
-                        } else {
-                            egui::Color32::from_rgb(92, 80, 28)
-                        };
-                        push(&mut job, &text[start..end], Some(bg));
-                        pos = end;
-                    }
-                    if pos < text.len() {
-                        push(&mut job, &text[pos..], None);
-                    }
-                }
-                ui.fonts(|f| f.layout_job(job))
+        let syntax = self.preview_syntax(&self.preview_draft);
+        let mut layouter = move |ui: &egui::Ui, text: &str, wrap_width: f32| {
+            let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+            let mut job = egui::text::LayoutJob::default();
+            // 自适应换行：使用 TextEdit 传入的换行宽度，长行不再溢出面板。
+            job.wrap.max_width = wrap_width;
+            let base = ui.visuals().text_color();
+            let push = |job: &mut egui::text::LayoutJob, seg: &str, color: egui::Color32| {
+                job.append(
+                    seg,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: font_id.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
             };
+            // 1) 语法着色（VSCode Dark+ 配色，opencode=JSON / 其余=YAML）
+            let mut pos = 0;
+            for (start, end, color) in syntax_tokens(text, syntax) {
+                if start > pos {
+                    push(&mut job, &text[pos..start], base);
+                }
+                if end > start {
+                    push(&mut job, &text[start..end], color);
+                }
+                pos = pos.max(end);
+            }
+            if pos < text.len() {
+                push(&mut job, &text[pos..], base);
+            }
+            // 2) 查找命中底色叠加在语法色之上
+            if !find_matches.is_empty() {
+                apply_find_background(&mut job, &find_matches, find_current);
+            }
+            ui.fonts(|f| f.layout_job(job))
+        };
         egui::ScrollArea::vertical()
             .id_salt("preview_scroll")
             .auto_shrink([false, false])
@@ -3411,10 +3739,12 @@ impl App {
                     let bounded = byte.min(self.preview_draft.len());
                     let char_idx = self.preview_draft[..bounded].chars().count();
                     let mut state = output.state.clone();
-                    state.cursor.set_char_range(Some(egui::text_selection::CCursorRange::two(
-                        egui::text::CCursor::new(char_idx),
-                        egui::text::CCursor::new(char_idx),
-                    )));
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text_selection::CCursorRange::two(
+                            egui::text::CCursor::new(char_idx),
+                            egui::text::CCursor::new(char_idx),
+                        )));
                     state.store(ui.ctx(), resp.id);
                 }
                 self.preview_focused = resp.has_focus();
@@ -3826,9 +4156,9 @@ pub fn load_or_empty(path: &str) -> (Value, Vec<AgentRow>, Vec<ProviderRow>) {
         .unwrap_or_else(|_| (Value::Object(Map::new()), Vec::new(), Vec::new()))
 }
 
-/// 加载 pi-agent 配置（支持本地与 WSL 路径）；读取/解析失败返回 Err。
-pub fn load_pi_agent_result(path: &str) -> Result<(Value, Vec<ProviderRow>, Value), String> {
-    let load = crate::backends::load_backend(ConfigFormat::PiAgent, path)?;
+/// 加载 pi 配置（支持本地与 WSL 路径）；读取/解析失败返回 Err。
+pub fn load_pi_result(path: &str) -> Result<(Value, Vec<ProviderRow>, Value), String> {
+    let load = crate::backends::load_backend(ConfigFormat::Pi, path)?;
     Ok((load.root, load.providers, load.extras))
 }
 
@@ -4267,5 +4597,91 @@ mod model_fetch_tests {
     fn sanitize_network_error_url_no_query_untouched() {
         let msg = r#"connection failed for URL "https://api.example.com/v1/models""#;
         assert_eq!(sanitize_network_error(msg), msg);
+    }
+}
+
+#[cfg(test)]
+mod syntax_highlight_tests {
+    use super::{
+        json_tokens, syntax_tokens, yaml_tokens, PreviewSyntax, SYN_COMMENT, SYN_KEY, SYN_NUMBER,
+        SYN_STRING,
+    };
+    use eframe::egui;
+
+    /// 段落必须落在字符边界上，否则 LayoutJob 切片会 panic。
+    fn assert_boundaries(text: &str, tokens: &[(usize, usize, egui::Color32)]) {
+        for &(s, e, _) in tokens {
+            assert!(
+                text.is_char_boundary(s),
+                "start {} 不在字符边界: {:?}",
+                s,
+                text
+            );
+            assert!(
+                text.is_char_boundary(e),
+                "end {} 不在字符边界: {:?}",
+                e,
+                text
+            );
+            assert!(s <= e);
+        }
+    }
+
+    #[test]
+    fn json_distinguishes_key_and_value_strings() {
+        let text = r#"{"apiKey": "sk-xxx", "count": 12, "on": true}"#;
+        let tokens = json_tokens(text);
+        assert_boundaries(text, &tokens);
+        let color_of = |needle: &str| {
+            let start = text.find(needle).unwrap();
+            tokens
+                .iter()
+                .find(|(s, e, _)| *s <= start && start < *e)
+                .map(|(_, _, c)| *c)
+                .unwrap()
+        };
+        assert_eq!(color_of("apiKey"), SYN_KEY);
+        assert_eq!(color_of("sk-xxx"), SYN_STRING);
+        assert_eq!(color_of("12"), SYN_NUMBER);
+    }
+
+    #[test]
+    fn json_handles_comments_and_non_ascii() {
+        let text =
+            "{\n  // 中文注释 \"引号\"\n  \"名前\": \"值\",\n  /* 块注释 */\n  \"n\": 1.5e3\n}";
+        let tokens = json_tokens(text);
+        assert_boundaries(text, &tokens);
+        let comment_start = text.find("//").unwrap();
+        let comment = tokens
+            .iter()
+            .find(|(s, _, c)| *s == comment_start && *c == SYN_COMMENT);
+        assert!(comment.is_some(), "未识别行注释");
+        assert!(tokens
+            .iter()
+            .any(|(s, _, c)| *s == text.find("\"名前\"").unwrap() && *c == SYN_KEY));
+    }
+
+    #[test]
+    fn yaml_colors_keys_comments_and_literals() {
+        let text = "# 顶部注释\nbaseURL: \"https://example.com/v1\"\ntimeout: 180000\nenabled: true\n# 中文注释\n";
+        let tokens = yaml_tokens(text);
+        assert_boundaries(text, &tokens);
+        let color_of = |needle: &str| {
+            let start = text.find(needle).unwrap();
+            tokens
+                .iter()
+                .find(|(s, e, _)| *s <= start && start < *e)
+                .map(|(_, _, c)| *c)
+                .unwrap()
+        };
+        assert_eq!(color_of("baseURL"), SYN_KEY);
+        assert_eq!(color_of("https://example.com/v1"), SYN_STRING);
+        assert_eq!(color_of("180000"), SYN_NUMBER);
+    }
+
+    #[test]
+    fn syntax_dispatch_matches_page_kind() {
+        assert_eq!(syntax_tokens("{}", PreviewSyntax::Json).len(), 2);
+        assert!(syntax_tokens("a: 1\n", PreviewSyntax::Yaml).len() >= 3);
     }
 }

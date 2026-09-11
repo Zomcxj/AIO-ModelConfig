@@ -1,6 +1,6 @@
 //! oh-my-pi（omp）后端：`~/.omp/agent/models.yml`（YAML）。
 //!
-//! schema 与 pi-agent 同族（顶层 `providers` + extras），差异：
+//! schema 与 pi 同族（顶层 `providers` + extras），差异：
 //! - 思考档位用 `thinking: {mode, efforts, effortMap}`（pi 用 `thinkingLevelMap`）；
 //! - provider/model 支持大量扩展字段（headers/auth/discovery/modelOverrides/cost/...），
 //!   保存时以 raw 为基底原样保留，仅重写 UI 管理的字段；
@@ -205,7 +205,7 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
     // 同格式未修改时保留 raw 原样；跨格式或用户改动时写出当前值（缺省打勾）。
     let native_omp = matches!(
         p.source_format,
-        Some(crate::format::ConfigFormat::PiAgent) | Some(crate::format::ConfigFormat::OhMyPi)
+        Some(crate::format::ConfigFormat::Pi) | Some(crate::format::ConfigFormat::OhMyPi)
     );
     if p.requires_reasoning_content != p.original_requires_reasoning_content || !native_omp {
         let mut c = obj
@@ -222,7 +222,10 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
 
     let models: Vec<Value> = p.models.iter().map(model_to_omp).collect();
     obj.insert("models".into(), Value::Array(models));
-    Value::Object(obj)
+    Value::Object(convert::order_fields(
+        obj,
+        &["baseUrl", "apiKey", "api", "compat", "models"],
+    ))
 }
 
 impl Backend for OhMyPiBackend {
@@ -255,14 +258,14 @@ impl Backend for OhMyPiBackend {
     fn detect(&self, content: &str, path: &str) -> bool {
         let lower = path.to_lowercase();
         if lower.ends_with(".json") || lower.ends_with(".jsonc") {
-            return false; // JSON 文件归 pi-agent 处理
+            return false; // JSON 文件归 pi 处理
         }
         let ext_yml = lower.ends_with(".yml") || lower.ends_with(".yaml");
         // 空内容（新建场景）：仅凭 .yml 扩展名归 omp
         if content.trim().is_empty() {
             return ext_yml;
         }
-        // 无扩展名上下文时，JSON 语法内容让位给 pi-agent（JSON 是 YAML 子集）
+        // 无扩展名上下文时，JSON 语法内容让位给 pi（JSON 是 YAML 子集）
         if !ext_yml
             && parse_config_content(content)
                 .map(|v| v.get("providers").and_then(|x| x.as_object()).is_some())

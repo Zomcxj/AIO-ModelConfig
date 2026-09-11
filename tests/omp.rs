@@ -78,7 +78,7 @@ fn detect_format_registry_order() {
     );
     assert_eq!(
         backends::detect_format("{\"providers\": {}}", "models.json"),
-        ConfigFormat::PiAgent
+        ConfigFormat::Pi
     );
     assert_eq!(
         backends::detect_format("providers: {}", "models.yaml"),
@@ -332,4 +332,26 @@ fn real_user_models_yml_round_trip() {
     // 渲染为合法 YAML
     let yaml_text = b.render(&root, false).expect("渲染失败");
     parse_yaml_content(&yaml_text).expect("渲染结果必须可回读");
+}
+
+#[test]
+fn provider_to_omp_places_compat_between_api_and_models() {
+    // 与 pi 一致：compat 固定跟在 api 之后、models 之前。
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.base_url = "https://example.com/v1".into();
+    provider.api_key = "sk-x".into();
+    provider.pi_api = "openai-completions".into();
+    provider.compat = false;
+    let out = provider_to_omp(&provider);
+    let keys: Vec<&str> = out
+        .as_object()
+        .expect("provider 应为对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        keys.starts_with(&["baseUrl", "apiKey", "api", "compat", "models"]),
+        "字段顺序应为 baseUrl → apiKey → api → compat → models，实际 {keys:?}"
+    );
 }

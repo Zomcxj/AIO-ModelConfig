@@ -113,7 +113,7 @@ pub fn model_from_pi(v: &Value) -> ModelRow {
         source_format: Some(if is_dsh_shaped_model(v) {
             crate::format::ConfigFormat::DeepSeekHarness
         } else {
-            crate::format::ConfigFormat::PiAgent
+            crate::format::ConfigFormat::Pi
         }),
         raw: v.clone(),
     }
@@ -268,12 +268,32 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         original_requires_reasoning_content: requires_reasoning_content,
         models,
         new_model: ModelRow::new(),
-        source_format: Some(crate::format::ConfigFormat::PiAgent),
+        source_format: Some(crate::format::ConfigFormat::Pi),
         raw: v.clone(),
         pi_api: api.to_string(),
     };
     r
 }
+
+/// 把指定键按给定顺序排到对象最前，其余键保持原有相对顺序（稳定输出，避免
+/// 新增键被追加到文件末尾造成字段位置不一致）。
+pub fn order_fields(object: Map<String, Value>, keys: &[&str]) -> Map<String, Value> {
+    let mut ordered = Map::new();
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            ordered.insert((*key).to_string(), value.clone());
+        }
+    }
+    for (key, value) in &object {
+        if !keys.contains(&key.as_str()) {
+            ordered.insert(key.clone(), value.clone());
+        }
+    }
+    ordered
+}
+
+/// pi / omp provider 的字段顺序：baseUrl → apiKey → api → compat → models，其余保留。
+const PROVIDER_FIELD_ORDER: &[&str] = &["baseUrl", "apiKey", "api", "compat", "models"];
 
 pub fn provider_to_pi(p: &ProviderRow) -> Value {
     // opencode 来源全新构造；pi/omp 来源以 raw 为基底保留扩展字段（headers/auth 等）
@@ -302,7 +322,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
     // 保留 raw 原样；跨格式或用户改动时写出当前值（缺省打勾）。
     let native_pi = matches!(
         p.source_format,
-        Some(crate::format::ConfigFormat::PiAgent) | Some(crate::format::ConfigFormat::OhMyPi)
+        Some(crate::format::ConfigFormat::Pi) | Some(crate::format::ConfigFormat::OhMyPi)
     );
     if p.requires_reasoning_content != p.original_requires_reasoning_content || !native_pi {
         let mut c = obj
@@ -341,7 +361,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
     obj.insert("api".into(), Value::String(api));
     let models: Vec<Value> = p.models.iter().map(model_to_pi).collect();
     obj.insert("models".into(), Value::Array(models));
-    Value::Object(obj)
+    Value::Object(order_fields(obj, PROVIDER_FIELD_ORDER))
 }
 
 pub fn load_pi_providers(root: &Value) -> Vec<ProviderRow> {

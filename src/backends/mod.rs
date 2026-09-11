@@ -12,7 +12,7 @@
 pub mod deepseek_harness;
 pub mod oh_my_pi;
 pub mod opencode;
-pub mod pi_agent;
+pub mod pi;
 
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ProviderRow};
@@ -100,7 +100,7 @@ pub static BACKENDS: &[&dyn Backend] = &[
     &opencode::BACKEND,
     &deepseek_harness::BACKEND,
     &oh_my_pi::BACKEND,
-    &pi_agent::BACKEND,
+    &pi::BACKEND,
 ];
 
 /// 按标识查找后端。

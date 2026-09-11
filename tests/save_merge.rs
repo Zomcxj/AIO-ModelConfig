@@ -67,7 +67,7 @@ fn merge_upserts_ui_agent_over_target() {
 
 #[test]
 fn pi_merge_preserves_target_extras() {
-    // 模拟 save_pi_agent_to 的跨目标合并：目标 root 取目标文件自身（含 providers），
+    // 模拟 save_pi_to 的跨目标合并：目标 root 取目标文件自身（含 providers），
     // 仅重写 providers 中的条目，目标独有条目保留。
     let mut p = std::env::temp_dir();
     p.push("opencode_test_pi_merge.json");

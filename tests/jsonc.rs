@@ -57,7 +57,7 @@ fn parse_empty_content_is_ok() {
 fn detect_from_content_distinguishes_formats() {
     assert_eq!(
         ConfigPaths::detect_from_content("{\"providers\": {}}"),
-        ConfigFormat::PiAgent
+        ConfigFormat::Pi
     );
     assert_eq!(
         ConfigPaths::detect_from_content("{\"provider\": {}}"),
@@ -78,7 +78,7 @@ fn target_path_prefers_local_when_exists() {
     std::fs::write(&p, "{}").unwrap();
     let paths = ConfigPaths {
         opencode: p.to_string_lossy().to_string(),
-        pi_agent: p.to_string_lossy().to_string(),
+        pi: p.to_string_lossy().to_string(),
         oh_my_pi: p.to_string_lossy().to_string(),
         deepseek_harness: p.to_string_lossy().to_string(),
     };

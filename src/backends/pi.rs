@@ -1,4 +1,4 @@
-//! pi-agent 后端：`~/.pi/agent/models.json`（JSONC）。
+//! pi 后端：`~/.pi/agent/models.json`（JSONC）。
 //!
 //! 结构：顶层 `providers`（map）+ 其他顶层字段（extras）原样保留。
 
@@ -10,9 +10,9 @@ use crate::util::{parse_config_content, read_config_content, wsl_home, WslPathPr
 use serde_json::{Map, Value};
 use std::path::Path;
 
-pub struct PiAgentBackend;
+pub struct PiBackend;
 
-pub static BACKEND: PiAgentBackend = PiAgentBackend;
+pub static BACKEND: PiBackend = PiBackend;
 
 fn default_local_path() -> String {
     let home = std::env::var("USERPROFILE")
@@ -21,9 +21,9 @@ fn default_local_path() -> String {
     format!("{}\\.pi\\agent\\models.json", home)
 }
 
-impl Backend for PiAgentBackend {
+impl Backend for PiBackend {
     fn id(&self) -> ConfigFormat {
-        ConfigFormat::PiAgent
+        ConfigFormat::Pi
     }
 
     fn default_local_path(&self) -> String {
@@ -96,7 +96,7 @@ impl Backend for PiAgentBackend {
 
     fn icon_rgba(&self) -> Option<(&'static [u8], u32, u32)> {
         Some((
-            include_bytes!("../../assets/agents/pi-agent_32.bin"),
+            include_bytes!("../../assets/agents/pi_32.bin"),
             32,
             32,
         ))

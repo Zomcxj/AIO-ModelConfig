@@ -34,7 +34,9 @@ fn requires_reasoning_content_maps_pi_and_omp_keys() {
         out["compat"]["requiresReasoningContentForAllAssistantTurns"],
         false
     );
-    assert!(out["compat"].get("requiresReasoningContentOnAssistantMessages").is_none());
+    assert!(out["compat"]
+        .get("requiresReasoningContentOnAssistantMessages")
+        .is_none());
 }
 
 #[test]
@@ -55,14 +57,20 @@ fn requires_reasoning_content_defaults_false_from_opencode() {
 
 #[test]
 fn api_to_npm_mapping() {
-    assert_eq!(convert::api_to_npm("anthropic-messages"), "@ai-sdk/anthropic");
+    assert_eq!(
+        convert::api_to_npm("anthropic-messages"),
+        "@ai-sdk/anthropic"
+    );
     assert_eq!(convert::api_to_npm("openai-completions"), "");
     assert_eq!(convert::api_to_npm("custom-api"), "custom-api");
 }
 
 #[test]
 fn npm_to_api_mapping() {
-    assert_eq!(convert::npm_to_api("@ai-sdk/anthropic"), "anthropic-messages");
+    assert_eq!(
+        convert::npm_to_api("@ai-sdk/anthropic"),
+        "anthropic-messages"
+    );
     assert_eq!(convert::npm_to_api(""), "openai-completions");
     assert_eq!(convert::npm_to_api("@ai-sdk/openai"), "openai-completions");
     assert_eq!(convert::npm_to_api("custom-npm"), "custom-npm");
@@ -253,7 +261,10 @@ fn provider_to_pi_omits_compat_when_true() {
     let provider = convert::provider_from_pi("anthropic", &v);
     assert!(provider.compat);
     let output = convert::provider_to_pi(&provider);
-    assert!(output.get("compat").is_none(), "compat should be omitted when true");
+    assert!(
+        output.get("compat").is_none(),
+        "compat should be omitted when true"
+    );
 }
 
 #[test]
@@ -328,16 +339,10 @@ fn pi_api_survives_oc_roundtrip_without_npm() {
 
     // OC 保存：npm 为空的 provider 会丢失 npm 字段（oc 格式用 npm 表达 api）
     let mut oc = serde_json::Map::new();
-    oc.insert(
-        "k".into(),
-        provider_from_row_npm(&provider, ""),
-    );
+    oc.insert("k".into(), provider_from_row_npm(&provider, ""));
 
     // 从 oc 读回，npm 为空
-    let back = convert::provider_from_pi(
-        "k",
-        &oc["k"],
-    );
+    let back = convert::provider_from_pi("k", &oc["k"]);
     let _ = back;
     // 真正的断言在 row 层：row 保留 pi_api 记忆
     assert_eq!(provider.pi_api, "anthropic-messages");
@@ -405,7 +410,11 @@ fn pi_roundtrip_preserves_provider_and_model_extras() {
     let out = convert::provider_to_pi(&provider);
     assert_eq!(out["authHeader"], json!(true), "provider 扩展字段必须保留");
     assert_eq!(out["headers"]["X-Team"], json!("platform"));
-    assert_eq!(out["models"][0]["toolName"], json!("custom"), "model 扩展字段必须保留");
+    assert_eq!(
+        out["models"][0]["toolName"],
+        json!("custom"),
+        "model 扩展字段必须保留"
+    );
 }
 
 #[test]
@@ -447,7 +456,10 @@ fn pi_save_from_omp_raw_translates_thinking_and_keeps_extras() {
     });
     let out = convert::model_to_pi(&m);
     assert_eq!(out["thinkingLevelMap"], json!({"high": "max"}));
-    assert!(out.get("thinking").is_none(), "omp thinking 块必须翻译后移除");
+    assert!(
+        out.get("thinking").is_none(),
+        "omp thinking 块必须翻译后移除"
+    );
     assert_eq!(out["cost"]["input"], json!(3.0), "omp 扩展字段应保留");
 }
 
@@ -467,12 +479,23 @@ fn opencode_rows_from_pi_raw_build_fresh() {
     assert!(out.get("api").is_none(), "pi 的 api 键不得泄漏");
     assert!(out.get("compat").is_none(), "pi 的 compat 键不得泄漏");
     let m = &out["models"]["m"];
-    assert!(m.get("id").is_none(), "pi 的 id 键不得泄漏（opencode 以 map key 为身份）");
+    assert!(
+        m.get("id").is_none(),
+        "pi 的 id 键不得泄漏（opencode 以 map key 为身份）"
+    );
     assert!(m.get("contextWindow").is_none());
     assert!(m.get("maxTokens").is_none());
     assert!(m.get("input").is_none());
-    assert_eq!(m["limit"]["context"], json!(128000), "contextWindow 应翻译为 limit.context");
-    assert_eq!(m["modalities"]["input"][0], json!("text"), "input 应翻译为 modalities.input");
+    assert_eq!(
+        m["limit"]["context"],
+        json!(128000),
+        "contextWindow 应翻译为 limit.context"
+    );
+    assert_eq!(
+        m["modalities"]["input"][0],
+        json!("text"),
+        "input 应翻译为 modalities.input"
+    );
 }
 
 #[test]
@@ -495,8 +518,61 @@ fn anthropic_proxy_url_v1_preserved() {
 fn pi_model_with_thinking_only_counts_as_reasoning() {
     // pi/omp 只写 thinkingLevelMap / thinking 块（DSH 为 reasoningEfforts）时，
     // reasoning 也应判定为开启，否则这些模型的勾选状态在其他页面显示不出来。
-    assert!(convert::model_from_pi(&json!({"id": "m", "thinkingLevelMap": {"high": "high"}})).reasoning);
+    assert!(
+        convert::model_from_pi(&json!({"id": "m", "thinkingLevelMap": {"high": "high"}})).reasoning
+    );
     assert!(convert::model_from_pi(&json!({"id": "m", "thinking": {"mode": "effort"}})).reasoning);
-    assert!(convert::model_from_pi(&json!({"id": "m", "reasoningEfforts": {"high": "high"}})).reasoning);
+    assert!(
+        convert::model_from_pi(&json!({"id": "m", "reasoningEfforts": {"high": "high"}})).reasoning
+    );
     assert!(!convert::model_from_pi(&json!({"id": "m", "reasoning": false})).reasoning);
+}
+
+#[test]
+fn provider_to_pi_places_compat_between_api_and_models() {
+    // compat 必须固定跟在 api 之后、models 之前，不能因新增键被追加到字段末尾。
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.base_url = "https://example.com/v1".into();
+    provider.api_key = "sk-x".into();
+    provider.pi_api = "openai-completions".into();
+    provider.compat = false;
+    let out = convert::provider_to_pi(&provider);
+    let keys: Vec<&str> = out
+        .as_object()
+        .expect("provider 应为对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        keys.starts_with(&["baseUrl", "apiKey", "api", "compat", "models"]),
+        "字段顺序应为 baseUrl → apiKey → api → compat → models，实际 {keys:?}"
+    );
+
+    // pi 原生 provider（raw 里 compat 原本在末尾）保存后也应归位
+    let mut native = ProviderRow::new();
+    native.key = "demo".into();
+    native.base_url = "https://example.com/v1".into();
+    native.api_key = "sk-x".into();
+    native.pi_api = "openai-completions".into();
+    native.compat = true;
+    native.source_format = Some(model_harbor::format::ConfigFormat::Pi);
+    native.raw = json!({
+        "baseUrl": "https://example.com/v1",
+        "apiKey": "sk-x",
+        "api": "openai-completions",
+        "models": [],
+        "compat": {"requiresReasoningContentOnAssistantMessages": false}
+    });
+    let out = convert::provider_to_pi(&native);
+    let keys: Vec<&str> = out
+        .as_object()
+        .expect("provider 应为对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        keys.starts_with(&["baseUrl", "apiKey", "api", "compat", "models"]),
+        "原生 provider 的 compat 也应归位，实际 {keys:?}"
+    );
 }

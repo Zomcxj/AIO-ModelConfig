@@ -5,6 +5,7 @@
 
 use super::{Backend, BackendLoad};
 use crate::convert;
+use crate::convert::order_fields;
 use crate::credentials;
 use crate::format::ConfigFormat;
 use crate::model::{AgentRow, ModelRow, ProviderRow};
@@ -58,11 +59,11 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
         if !m.name.trim().is_empty() {
             fields.insert("name".into(), Value::String(m.name.clone()));
         }
-        if let Ok(v) = m.context.parse::<i64>() {
-            fields.insert("contextWindow".into(), v.into());
+        if let Some(v) = crate::util::parse_number_text(&m.context) {
+            fields.insert("contextWindow".into(), v);
         }
-        if let Ok(v) = m.output.parse::<i64>() {
-            fields.insert("maxTokens".into(), v.into());
+        if let Some(v) = crate::util::parse_number_text(&m.output) {
+            fields.insert("maxTokens".into(), v);
         }
         Map::from_iter(fields)
     };
@@ -97,17 +98,23 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
     let context_changed = m.context != crate::util::num_at(&m.raw, "contextWindow");
     let output_changed = m.output != crate::util::num_at(&m.raw, "maxTokens");
     if !preserve_raw || context_changed {
-        if let Ok(v) = m.context.parse::<i64>() {
-            obj.insert("contextWindow".into(), v.into());
-        } else {
-            obj.remove("contextWindow");
+        match crate::util::parse_number_text(&m.context) {
+            Some(v) => {
+                obj.insert("contextWindow".into(), v);
+            }
+            None => {
+                obj.remove("contextWindow");
+            }
         }
     }
     if !preserve_raw || output_changed {
-        if let Ok(v) = m.output.parse::<i64>() {
-            obj.insert("maxTokens".into(), v.into());
-        } else {
-            obj.remove("maxTokens");
+        match crate::util::parse_number_text(&m.output) {
+            Some(v) => {
+                obj.insert("maxTokens".into(), v);
+            }
+            None => {
+                obj.remove("maxTokens");
+            }
         }
     }
     if preserve_raw && m.variants == m.original_variants {
@@ -160,25 +167,6 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
             "reasoningEfforts",
         ],
     ))
-}
-
-/// 按键顺序重排：`keys` 中的键排在前面，其余键保持原顺序。
-/// 注意：不能用 `Map::remove` —— 启用 preserve_order 时 serde_json 的
-/// `remove` 是 swap_remove（把末尾元素填到被删位置），会把其余键的顺序打乱，
-/// 例如 DSH 的 timeoutMs 会跑到 retryPolicy 之前，保存时产生无意义重排。
-fn order_fields(object: Map<String, Value>, keys: &[&str]) -> Map<String, Value> {
-    let mut ordered = Map::new();
-    for key in keys {
-        if let Some(value) = object.get(*key) {
-            ordered.insert((*key).to_string(), value.clone());
-        }
-    }
-    for (key, value) in &object {
-        if !keys.contains(&key.as_str()) {
-            ordered.insert(key.clone(), value.clone());
-        }
-    }
-    ordered
 }
 
 fn dsh_base_url(api: &str, url: &str) -> String {
@@ -513,7 +501,7 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
         || p.dsh_max_retries != p.original_dsh_max_retries
         || !preserve_raw
     {
-        let retries_set = p.dsh_max_retries.trim().parse::<i64>().is_ok();
+        let retries_set = crate::util::parse_number_text(&p.dsh_max_retries).is_some();
         if p.dsh_retry_mode.trim().is_empty() && !retries_set {
             obj.remove("retryPolicy");
         } else {
@@ -530,20 +518,26 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
                 p.dsh_retry_mode.as_str()
             };
             policy.insert("mode".into(), Value::String(mode.to_string()));
-            if let Ok(value) = p.dsh_max_retries.parse::<i64>() {
-                policy.insert("maxRetries".into(), value.into());
-            } else {
-                policy.remove("maxRetries");
+            match crate::util::parse_number_text(&p.dsh_max_retries) {
+                Some(value) => {
+                    policy.insert("maxRetries".into(), value);
+                }
+                None => {
+                    policy.remove("maxRetries");
+                }
             }
             obj.insert("retryPolicy".into(), Value::Object(policy));
         }
     }
     // retryPolicy 在 timeoutMs 之前写出，与 DSH 文件惯例一致（最小 diff）。
     if p.dsh_timeout_ms != p.original_dsh_timeout_ms || !preserve_raw {
-        if let Ok(value) = p.dsh_timeout_ms.parse::<i64>() {
-            obj.insert("timeoutMs".into(), value.into());
-        } else {
-            obj.remove("timeoutMs");
+        match crate::util::parse_number_text(&p.dsh_timeout_ms) {
+            Some(value) => {
+                obj.insert("timeoutMs".into(), value);
+            }
+            None => {
+                obj.remove("timeoutMs");
+            }
         }
     }
     Value::Object(order_fields(

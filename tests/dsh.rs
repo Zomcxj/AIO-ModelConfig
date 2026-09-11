@@ -338,3 +338,51 @@ fn dsh_cross_format_preserves_target_only_provider() {
     );
     assert!(provs.get("demo").is_some(), "来源 provider 应写入");
 }
+
+#[test]
+fn dsh_retry_max_retries_round_trip_from_file() {
+    // 贴近实际流程：加载文件 → 改 maxRetries → 当前文件保存 → 渲染 YAML 文本
+    let settings = temp_path("retry-roundtrip.yaml");
+    std::fs::write(
+        &settings,
+        "ui-theme:\n  name: dark\nllm-pi-ai:\n  providers:\n    demo:\n      apiKeyEnv: DSH_TEST_KEY\n      api: openai-completions\n      baseURL: https://example.invalid/v1\n      timeoutMs: 180000\n      retryPolicy:\n        mode: normal\n      models:\n        - id: m1\n          name: M1\n",
+    )
+    .unwrap();
+    let load = backends::load_backend(ConfigFormat::DeepSeekHarness, settings.to_str().unwrap())
+        .expect("DSH 配置应可加载");
+    let mut provider = load.providers[0].clone();
+    assert_eq!(provider.dsh_max_retries, "", "文件未写 maxRetries 时 UI 应为空");
+    provider.dsh_max_retries = "7".into();
+
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let root = backend.serialize_root(&[], &[provider], &load.root, None);
+    let text = backend.render(&root, false).unwrap();
+    assert!(
+        text.contains("maxRetries: 7"),
+        "保存后应写入 maxRetries，实际输出：\n{text}"
+    );
+    std::fs::remove_file(&settings).ok();
+}
+
+#[test]
+fn dsh_max_retries_accepts_padded_and_float_input() {
+    // UI 允许带空白/小数的数字输入（会 trim），保存时必须写入而不是静默丢弃。
+    let backend = backends::backend(ConfigFormat::DeepSeekHarness);
+    let mut provider = ProviderRow::new();
+    provider.key = "demo".into();
+    provider.dsh_retry_mode = "normal".into();
+    provider.dsh_max_retries = " 3 ".into();
+    let root = backend.serialize_root(&[], &[provider], &json!({}), None);
+    let demo = &root["llm-pi-ai"]["providers"]["demo"];
+    assert_eq!(demo["retryPolicy"]["maxRetries"], 3, "带空白输入应写入");
+
+    let mut provider = ProviderRow::new();
+    provider.key = "demo2".into();
+    provider.dsh_retry_mode = "normal".into();
+    provider.dsh_max_retries = " 2 ".into();
+    provider.dsh_timeout_ms = " 180000 ".into();
+    let root = backend.serialize_root(&[], &[provider], &json!({}), None);
+    let demo = &root["llm-pi-ai"]["providers"]["demo2"];
+    assert_eq!(demo["retryPolicy"]["maxRetries"], 2);
+    assert_eq!(demo["timeoutMs"], 180000, "timeoutMs 带空白输入应写入");
+}

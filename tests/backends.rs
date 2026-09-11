@@ -33,7 +33,7 @@ fn pi_provider(key: &str, model_id: &str) -> ProviderRow {
 #[test]
 fn backend_registry_covers_all_formats() {
     assert_eq!(backends::backend(ConfigFormat::Opencode).id(), ConfigFormat::Opencode);
-    assert_eq!(backends::backend(ConfigFormat::PiAgent).id(), ConfigFormat::PiAgent);
+    assert_eq!(backends::backend(ConfigFormat::Pi).id(), ConfigFormat::Pi);
     // 注册表顺序：第 0 个为判别回落项
     assert_eq!(backends::BACKENDS[0].id(), ConfigFormat::Opencode);
 }
@@ -42,7 +42,7 @@ fn backend_registry_covers_all_formats() {
 fn detect_format_distinguishes_backends() {
     assert_eq!(
         backends::detect_format("{\"providers\": {}}", ""),
-        ConfigFormat::PiAgent
+        ConfigFormat::Pi
     );
     assert_eq!(
         backends::detect_format("{\"provider\": {}}", ""),
@@ -88,7 +88,7 @@ fn pi_parse_and_current_file_save() {
         "providers": { "p1": { "baseUrl": "https://x/v1", "api": "openai-completions", "apiKey": "k", "models": [] } },
         "extraTop": { "kept": true }
     }"#;
-    let b = backends::backend(ConfigFormat::PiAgent);
+    let b = backends::backend(ConfigFormat::Pi);
     let load = b.parse(content).expect("解析失败");
     assert_eq!(load.providers.len(), 1);
     assert!(load.agents.is_empty());
@@ -126,7 +126,7 @@ fn opencode_cross_target_merge_upserts() {
 
 #[test]
 fn pi_cross_target_uses_target_extras() {
-    let b = backends::backend(ConfigFormat::PiAgent);
+    let b = backends::backend(ConfigFormat::Pi);
     // 目标文件自身的顶层字段应被采用，而非来源 extras
     let target_extras = json!({ "targetExtra": 1 });
     let providers = vec![pi_provider("p2", "m2")];

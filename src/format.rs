@@ -6,7 +6,7 @@ use std::path::Path;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ConfigFormat {
     Opencode,
-    PiAgent,
+    Pi,
     OhMyPi,
     DeepSeekHarness,
 }
@@ -15,7 +15,7 @@ impl ConfigFormat {
     pub fn label(&self) -> &str {
         match self {
             ConfigFormat::Opencode => "opencode",
-            ConfigFormat::PiAgent => "pi-agent",
+            ConfigFormat::Pi => "pi",
             ConfigFormat::OhMyPi => "oh-my-pi",
             ConfigFormat::DeepSeekHarness => "deepseek-harness",
         }
@@ -25,7 +25,7 @@ impl ConfigFormat {
 /// 各后端的解析后路径容器（含用户可覆盖的本地路径）。
 pub struct ConfigPaths {
     pub opencode: String,
-    pub pi_agent: String,
+    pub pi: String,
     pub oh_my_pi: String,
     pub deepseek_harness: String,
 }
@@ -34,7 +34,7 @@ impl Default for ConfigPaths {
     fn default() -> Self {
         Self {
             opencode: backends::backend(ConfigFormat::Opencode).default_local_path(),
-            pi_agent: backends::backend(ConfigFormat::PiAgent).default_local_path(),
+            pi: backends::backend(ConfigFormat::Pi).default_local_path(),
             oh_my_pi: backends::backend(ConfigFormat::OhMyPi).default_local_path(),
             deepseek_harness: backends::backend(ConfigFormat::DeepSeekHarness).default_local_path(),
         }
@@ -46,7 +46,7 @@ impl ConfigPaths {
     pub fn local_path(&self, format: ConfigFormat) -> String {
         match format {
             ConfigFormat::Opencode => self.opencode.clone(),
-            ConfigFormat::PiAgent => self.pi_agent.clone(),
+            ConfigFormat::Pi => self.pi.clone(),
             ConfigFormat::OhMyPi => self.oh_my_pi.clone(),
             ConfigFormat::DeepSeekHarness => self.deepseek_harness.clone(),
         }
