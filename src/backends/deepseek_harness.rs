@@ -258,6 +258,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         source_format: Some(ConfigFormat::DeepSeekHarness),
         raw: v.clone(),
         pi_api: api.to_string(),
+        show_api_key: false,
     }
 }
 

@@ -291,8 +291,17 @@ pub fn remove_config(path: &str) -> Result<(), String> {
     }
 }
 pub fn write_wsl_file(path: &str, content: &str) -> Result<(), String> {
-    let tmp: PathBuf =
-        std::env::temp_dir().join(format!("model_harbor_tmp_{}.json", std::process::id()));
+    // 固定名临时文件可能被本地恶意进程预置同名符号链接指向受害文件，
+    // 且内容含 API Key 明文；改用带纳秒时间的随机名降低风险。
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp: PathBuf = std::env::temp_dir().join(format!(
+        "model_harbor_tmp_{}_{}.json",
+        std::process::id(),
+        nonce
+    ));
     fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
     let tmp_str = tmp.to_string_lossy().replace('\\', "/");
     let tmp_wsl = win_to_wsl(&tmp_str);

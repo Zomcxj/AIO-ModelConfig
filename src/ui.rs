@@ -13,15 +13,15 @@ pub fn card_frame<R>(
         ui.visuals().extreme_bg_color
     };
     let (stroke_color, stroke_width) = match highlight {
-        1 => (egui::Color32::from_rgb(255, 180, 50), 2.0),  // source: orange
-        2 => (egui::Color32::from_rgb(100, 200, 100), 2.0),  // target: green
+        1 => (egui::Color32::from_rgb(255, 180, 50), 2.0), // source: orange
+        2 => (egui::Color32::from_rgb(100, 200, 100), 2.0), // target: green
         _ => (ui.visuals().widgets.noninteractive.bg_stroke.color, 1.0),
     };
     egui::Frame::NONE
         .fill(fill)
         .corner_radius(corner)
         .stroke(egui::Stroke::new(stroke_width, stroke_color))
-        .inner_margin(egui::Margin::symmetric(10, 4))
+        .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 2.0);
             add(ui);
@@ -29,8 +29,22 @@ pub fn card_frame<R>(
         .response
 }
 
+/// 表单字段标签：定宽右对齐、超长截断并悬停显示完整文本，避免长标签折行错位。
+pub fn field_label(ui: &mut egui::Ui, width: f32, text: impl Into<String>) -> egui::Response {
+    let text = text.into();
+    let label = egui::Label::new(egui::RichText::new(text.as_str()).weak())
+        .halign(egui::Align::RIGHT)
+        .truncate();
+    ui.add_sized([width, 24.0], label).on_hover_text(text)
+}
+
 /// 依次渲染卡片列表（每卡片之间附加行间距）。
-pub fn card_list(ui: &mut egui::Ui, keys: &[usize], row_gap: f32, mut f: impl FnMut(&mut egui::Ui, usize)) {
+pub fn card_list(
+    ui: &mut egui::Ui,
+    keys: &[usize],
+    row_gap: f32,
+    mut f: impl FnMut(&mut egui::Ui, usize),
+) {
     for &idx in keys {
         f(ui, idx);
         ui.add_space(row_gap);
@@ -76,6 +90,31 @@ pub fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     }
     let item = items.remove(from);
     items.insert(to, item);
+}
+
+/// 密钥输入框 + 一键显示/隐藏切换按钮。掩码状态下输入内容仍保留，仅显示为圆点。
+pub fn secret_text_edit(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    show: &mut bool,
+    width: f32,
+    hint: &str,
+) -> egui::Response {
+    let edit = egui::TextEdit::singleline(value)
+        .password(!*show)
+        .desired_width(width)
+        .hint_text(hint);
+    let resp = ui.add(edit);
+    let label = if *show { "隐藏" } else { "显示" };
+    ui.button(label)
+        .on_hover_text(if *show {
+            "点击掩码密钥，隐藏明文"
+        } else {
+            "点击显示密钥明文（注意防窥）"
+        })
+        .clicked()
+        .then(|| *show = !*show);
+    resp
 }
 
 /// 数字文本编辑框：内容非空且无法解析为数字时红色高亮并悬停提示。

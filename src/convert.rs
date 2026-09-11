@@ -264,6 +264,7 @@ pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
         source_format: Some(crate::format::ConfigFormat::PiAgent),
         raw: v.clone(),
         pi_api: api.to_string(),
+        show_api_key: false,
     };
     r
 }

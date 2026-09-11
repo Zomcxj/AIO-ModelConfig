@@ -4,7 +4,7 @@ use crate::credentials;
 use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
-use crate::ui::{card_frame, card_list, move_item, numeric_text_edit, DragHandle};
+use crate::ui::{card_frame, card_list, field_label, move_item, numeric_text_edit, secret_text_edit, DragHandle};
 use crate::util::{self, is_wsl_path, parse_number_text, show_file_dialog};
 use eframe::egui;
 use serde_json::{Map, Value};
@@ -63,6 +63,14 @@ fn sticky_end(ui: &mut egui::Ui, anchor: (f32, f32, f32, f32), paint: impl FnOnc
     // 用 new_child 而非 scope_builder：后者会推进父 cursor 到吸顶位置，
     // 破坏内容流导致滚动区滚轮失效。
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(target));
+    // 拦截层：吸顶条空白区域（标题文字间隙等）的点击/拖拽先被此层消费，
+    // 不再穿透到其正下方的卡片控件（误删/误展开/误拖放目标）。
+    // 先注册，后续的按钮仍在其上层优先响应。
+    child.interact(
+        target,
+        child.id().with("sticky-block"),
+        egui::Sense::click_and_drag(),
+    );
     child
         .painter()
         .rect_filled(target, 0.0, ui.visuals().panel_fill);
@@ -92,6 +100,22 @@ fn short_err(err: &str) -> String {
     }
 }
 
+/// 网络错误文本脱敏：ureq 的 Transport Display 会包含目标 URL，
+/// 若用户把凭据放进 URL query（如 `?key=sk-…`）会随错误泄漏到
+/// 状态栏/悬停提示；剥离 URL 的 query/fragment 后返回。
+fn sanitize_network_error(text: &str) -> String {
+    const MARK: &str = "for URL \"";
+    if let Some(idx) = text.find(MARK) {
+        let head = &text[..idx + MARK.len()];
+        let rest = &text[idx + MARK.len()..];
+        let url = rest.split('"').next().unwrap_or(rest);
+        let cut = url.find(['?', '#']).unwrap_or(url.len());
+        format!("{}{}\"", head, &url[..cut])
+    } else {
+        text.to_string()
+    }
+}
+
 /// 单个 provider 的延迟测试状态（provider 级 + 模型级并发）。
 #[derive(Default)]
 struct LatencyState {
@@ -117,7 +141,9 @@ fn latency_agent() -> ureq::Agent {
 fn http_error(err: ureq::Error, elapsed: u64) -> String {
     match err {
         ureq::Error::Status(code, _) => format!("HTTP {}（{} ms）", code, elapsed),
-        ureq::Error::Transport(t) => format!("网络错误：{}", t),
+        ureq::Error::Transport(t) => {
+            format!("网络错误：{}", sanitize_network_error(&t.to_string()))
+        }
     }
 }
 
@@ -245,7 +271,10 @@ fn fetch_models_remote(url: &str, secret: &str, api: &str) -> Result<Vec<String>
     }
     let response = request.call().map_err(|err| match err {
         ureq::Error::Status(code, resp) => format!("HTTP {}：{}", code, resp.status_text()),
-        ureq::Error::Transport(transport) => format!("网络错误：{}", transport),
+        ureq::Error::Transport(transport) => format!(
+            "网络错误：{}",
+            sanitize_network_error(&transport.to_string())
+        ),
     })?;
     let text = response.into_string().map_err(|err| err.to_string())?;
     parse_models_response(&text)
@@ -486,6 +515,7 @@ impl App {
                 self.agents = load.agents;
                 self.providers = load.providers;
                 self.pi_extras = load.extras;
+                self.load_error = None;
                 self.status = format!(
                     "已加载 ({}): {} agents, {} providers",
                     self.source_format.label(),
@@ -498,6 +528,7 @@ impl App {
                 self.agents = Vec::new();
                 self.providers = Vec::new();
                 self.pi_extras = Value::Object(Map::new());
+                self.load_error = Some(e.clone());
                 self.status = format!("加载失败: {}", e);
             }
         }
@@ -529,12 +560,19 @@ impl App {
                     };
                     let is_selected = self.current_page == id;
                     let btn = if is_selected {
-                        btn.fill(ui.visuals().selection.bg_fill)
+                        // 选中态：填充 + 描边，与未选中图标拉开视觉层级
+                        btn.fill(ui.visuals().selection.bg_fill).stroke(
+                            egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+                        )
                     } else {
                         btn
                     };
-                    // 只显示图标，鼠标悬停提示名称
-                    if ui.add(btn).on_hover_text(id.label()).clicked() {
+                    // 只显示图标，鼠标悬停提示名称；加大点击区便于操作
+                    let btn_resp = ui
+                        .add(btn.min_size(egui::vec2(24.0, 22.0)))
+                        .on_hover_text(id.label())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if btn_resp.clicked() {
                         if id == ConfigFormat::DeepSeekHarness
                             && self.current_page != ConfigFormat::DeepSeekHarness
                         {
@@ -665,14 +703,21 @@ impl App {
                         );
                     }
                     ui.label(egui::RichText::new(&self.status).weak());
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "agents: {} | providers: {}",
-                            self.agents.len(),
-                            self.providers.len()
-                        ))
-                        .weak(),
-                    );
+                    // 右侧：当前页 + 数量统计，随时可见页面身份
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "agents: {} | providers: {}",
+                                self.agents.len(),
+                                self.providers.len()
+                            ))
+                            .weak(),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("当前页: {}", self.current_page.label()))
+                                .weak(),
+                        );
+                    });
                 });
             });
     }
@@ -832,11 +877,8 @@ impl App {
             .map(|(_, a)| a.key.trim().to_string())
             .collect();
         let a = &mut self.agents[idx];
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("key").weak()),
-            );
+        ui.horizontal_wrapped(|ui| {
+            field_label(ui, 120.0, "key");
             let key_resp = ui.add(egui::TextEdit::singleline(&mut a.key).desired_width(120.0));
             if !a.key.trim().is_empty() && other_keys.contains(a.key.trim()) {
                 key_resp.on_hover_text("key 与其他 agent 重复，保存将被阻止");
@@ -846,22 +888,13 @@ impl App {
                         .color(egui::Color32::from_rgb(220, 90, 90)),
                 );
             }
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("mode").weak()),
-            );
+            field_label(ui, 120.0, "mode");
             ui.add(egui::TextEdit::singleline(&mut a.mode).desired_width(120.0));
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("description").weak()),
-            );
+            field_label(ui, 120.0, "description");
             ui.add(egui::TextEdit::singleline(&mut a.description).desired_width(450.0));
         });
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("model").weak()),
-            );
+        ui.horizontal_wrapped(|ui| {
+            field_label(ui, 120.0, "model");
             let mut model_options: Vec<String> = self
                 .providers
                 .iter()
@@ -893,10 +926,7 @@ impl App {
             if let Some(idx) = selected_idx {
                 a.model = model_options[idx].clone();
             }
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("variant").weak()),
-            );
+            field_label(ui, 120.0, "variant");
             let variant_options = ["", "low", "medium", "high", "xhigh", "max", "ultra"];
             let current_variant = a.variant.clone();
             let mut selected_variant = variant_options
@@ -922,21 +952,12 @@ impl App {
                 a.variant = variant_options[idx].to_string();
             }
         });
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("temperature").weak()),
-            );
+        ui.horizontal_wrapped(|ui| {
+            field_label(ui, 120.0, "temperature");
             numeric_text_edit(ui, &mut a.temperature, 120.0, "");
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("color").weak()),
-            );
+            field_label(ui, 120.0, "color");
             ui.add(egui::TextEdit::singleline(&mut a.color).desired_width(120.0));
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("system").weak()),
-            );
+            field_label(ui, 120.0, "system");
             ui.add(egui::TextEdit::singleline(&mut a.system).desired_width(450.0));
         });
         // key 重命名后同步展开状态（避免改名导致卡片收起）
@@ -948,40 +969,28 @@ impl App {
 
     fn ui_new_agent_form(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("key").weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, "key");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.key)
                         .hint_text("coding-assistant")
                         .desired_width(120.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("mode").weak()),
-                );
+                field_label(ui, 120.0, "mode");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.mode)
                         .hint_text("subagent")
                         .desired_width(120.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("description").weak()),
-                );
+                field_label(ui, 120.0, "description");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.description)
                         .hint_text("简要描述此 agent 的用途")
                         .desired_width(450.0),
                 );
             });
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("model").weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, "model");
                 let mut model_options: Vec<String> = self
                     .providers
                     .iter()
@@ -1013,10 +1022,7 @@ impl App {
                 if let Some(idx) = selected_idx {
                     self.new_agent.model = model_options[idx].clone();
                 }
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("variant").weak()),
-                );
+                field_label(ui, 120.0, "variant");
                 let variant_options = ["", "low", "medium", "high", "xhigh", "max", "ultra"];
                 let current_variant = self.new_agent.variant.clone();
                 let mut selected_variant = variant_options
@@ -1042,25 +1048,16 @@ impl App {
                     self.new_agent.variant = variant_options[idx].to_string();
                 }
             });
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("temperature").weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, "temperature");
                 numeric_text_edit(ui, &mut self.new_agent.temperature, 120.0, "0.7");
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("color").weak()),
-                );
+                field_label(ui, 120.0, "color");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.color)
                         .hint_text("#00ccff")
                         .desired_width(120.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("system").weak()),
-                );
+                field_label(ui, 120.0, "system");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_agent.system)
                         .hint_text("系统提示词")
@@ -1206,8 +1203,16 @@ impl App {
                 if !provider.api_key.trim().is_empty() && !cleared_on_dsh {
                     provider.api_key_secret = provider.api_key.clone();
                 }
-            } else if !provider.api_key_secret.trim().is_empty() {
-                provider.api_key = provider.api_key_secret.clone();
+            } else {
+                let cleared_on_dsh = !provider.original_api_key_secret.is_empty()
+                    && provider.api_key_secret.is_empty();
+                if cleared_on_dsh {
+                    // 与 DSH 方向对称：在 DSH 页明确清空过的密钥（原本有、当前空）
+                    // 不再用旧值填充其他页面，避免已清空的密钥被写回 opencode 等配置。
+                    provider.api_key = String::new();
+                } else if !provider.api_key_secret.trim().is_empty() {
+                    provider.api_key = provider.api_key_secret.clone();
+                }
             }
         }
     }
@@ -1318,14 +1323,23 @@ impl App {
         let mut notices: Vec<String> = Vec::new();
         for (_, state) in self.latency.iter_mut() {
             if let Some(rx) = &state.provider_rx {
-                if let Ok(result) = rx.try_recv() {
-                    let msg = match &result {
-                        Ok(ms) => format!("provider 延迟测试完成：{} ms", ms),
-                        Err(err) => format!("provider 延迟测试失败：{}", err),
-                    };
-                    notices.push(msg);
-                    state.provider = Some(result);
-                    state.provider_rx = None;
+                match rx.try_recv() {
+                    Ok(result) => {
+                        let msg = match &result {
+                            Ok(ms) => format!("provider 延迟测试完成：{} ms", ms),
+                            Err(err) => format!("provider 延迟测试失败：{}", err),
+                        };
+                        notices.push(msg);
+                        state.provider = Some(result);
+                        state.provider_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // 测量线程异常退出（panic 等）时收不到结果：
+                        // 终止等待并提示，避免 Spinner/进度永久卡死。
+                        state.provider_rx = None;
+                        notices.push("provider 延迟测试中断（线程异常退出）".to_string());
+                    }
                 }
             }
             if let Some(rx) = &state.model_rx {
@@ -1339,7 +1353,10 @@ impl App {
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             state.model_rx = None;
                             state.total = state.done;
-                            notices.push(format!("模型延迟测试完成（{}/{}）", state.done, state.total));
+                            notices.push(format!(
+                                "模型延迟测试完成（{}/{}）",
+                                state.done, state.total
+                            ));
                             break;
                         }
                     }
@@ -1647,11 +1664,8 @@ impl App {
         };
         let output_label = if show_oc { "limit.output" } else { "maxTokens" };
         let input_label = if show_oc { "modalities.input" } else { "input" };
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new("key").weak()),
-            );
+        ui.horizontal_wrapped(|ui| {
+            field_label(ui, 120.0, "key");
             let key_resp = ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
             if !p.key.trim().is_empty() && other_keys.contains(p.key.trim()) {
                 key_resp.on_hover_text("key 与其他 provider 重复，保存将被阻止");
@@ -1662,10 +1676,7 @@ impl App {
                 );
             }
             if show_oc {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("npm").weak()),
-                );
+                field_label(ui, 120.0, "npm");
                 let npm_options = [
                     "",
                     "@ai-sdk/openai",
@@ -1696,10 +1707,7 @@ impl App {
                 }
             }
             if !show_oc {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("api").weak()),
-                );
+                field_label(ui, 120.0, "api");
                 // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
                 let api_options: &[&str] = if show_omp {
                     &[
@@ -1747,10 +1755,7 @@ impl App {
             }
             // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
             if !show_oc && !show_dsh {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("compat").weak()),
-                );
+                field_label(ui, 120.0, "compat");
                 ui.checkbox(&mut p.compat, "supportsDeveloperRole");
                 // pi / omp 相互映射字段：加载 opencode/dsh 时缺省不勾选。
                 let requires_label = if show_omp {
@@ -1761,57 +1766,36 @@ impl App {
                 ui.checkbox(&mut p.requires_reasoning_content, requires_label);
             }
             if show_dsh_retry {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("retryPolicy.mode").weak()),
-                );
+                field_label(ui, 120.0, "retryPolicy.mode");
                 ui.add(egui::TextEdit::singleline(&mut p.dsh_retry_mode).desired_width(100.0));
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("maxRetries").weak()),
-                );
+                field_label(ui, 120.0, "maxRetries");
                 numeric_text_edit(ui, &mut p.dsh_max_retries, 55.0, "3");
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if show_provider_base_url {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(base_label).weak()),
-                );
+                field_label(ui, 120.0, base_label);
                 ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(200.0));
             }
-            ui.add_sized(
-                [60.0, 24.0],
-                egui::Label::new(egui::RichText::new(api_key_label).weak()),
-            );
+            field_label(ui, 120.0, api_key_label);
             if show_dsh {
                 ui.add(egui::TextEdit::singleline(&mut p.api_key_env).desired_width(192.0));
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("API Key").weak()),
-                );
-                ui.add(egui::TextEdit::singleline(&mut p.api_key_secret).desired_width(408.0));
+                field_label(ui, 120.0, "API Key");
+                secret_text_edit(ui, &mut p.api_key_secret, &mut p.show_api_key, 408.0, "");
             } else {
-                ui.add(egui::TextEdit::singleline(&mut p.api_key).desired_width(408.0));
+                secret_text_edit(ui, &mut p.api_key, &mut p.show_api_key, 408.0, "");
             }
             if show_oc && show_provider_timeout {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(timeout_label).weak()),
-                );
+                field_label(ui, 120.0, timeout_label);
                 numeric_text_edit(ui, &mut p.timeout, 70.0, "180000");
             }
             if show_dsh_retry {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("timeoutMs").weak()),
-                );
+                field_label(ui, 120.0, "timeoutMs");
                 numeric_text_edit(ui, &mut p.dsh_timeout_ms, 70.0, "180000");
             }
         });
 
-        ui.add_space(2.0);
+        ui.add_space(6.0);
         let mut fetch_request: Option<(String, String, String, String)> = None;
         let mut close_fetch = false;
         let mut latency_models: Option<(String, String, Vec<String>, String)> = None;
@@ -1849,8 +1833,7 @@ impl App {
             if let Some(state) = self.latency.get(&p.key) {
                 if state.model_rx.is_some() {
                     ui.label(
-                        egui::RichText::new(format!("模型 {}/{}", state.done, state.total))
-                            .small(),
+                        egui::RichText::new(format!("模型 {}/{}", state.done, state.total)).small(),
                     );
                 }
             }
@@ -1897,58 +1880,59 @@ impl App {
                             Ok(models) if models.is_empty() => {
                                 ui.label(egui::RichText::new("接口未返回任何模型").weak());
                             }
-                        Ok(models) => {
-                            let ids = models.clone();
-                            ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
-                            // 最多 5 列横向排列；区域高度固定为 22 行，
-                            // 每列超出部分在区域内垂直滚动查看。
-                            let cols = ids.len().clamp(1, 5);
-                            let per_col = ids.len().div_ceil(cols);
-                            let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                            let prev_spacing_x = ui.spacing().item_spacing.x;
-                            ui.spacing_mut().item_spacing.x = 28.0;
-                            egui::ScrollArea::vertical()
-                                .id_salt("model_fetch_scroll")
-                                .max_height(row_h * 22.5)
-                                .auto_shrink([false, true])
-                                .scroll_bar_visibility(
-                                    egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                                )
-                                .show(ui, |ui| {
-                                    ui.columns(cols, |columns| {
-                                        for (ci, column) in columns.iter_mut().enumerate() {
-                                            column.set_min_width(150.0);
-                                            for id in
-                                                ids.iter().skip(ci * per_col).take(per_col)
-                                            {
-                                                let mut checked =
-                                                    p.models.iter().any(|m| m.id.trim() == id);
-                                                if column.checkbox(&mut checked, id).changed()
-                                                    && checked
+                            Ok(models) => {
+                                let ids = models.clone();
+                                ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
+                                // 最多 5 列横向排列；区域高度固定为 22 行，
+                                // 每列超出部分在区域内垂直滚动查看。
+                                let cols = ids.len().clamp(1, 5);
+                                let per_col = ids.len().div_ceil(cols);
+                                let row_h =
+                                    ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                                let prev_spacing_x = ui.spacing().item_spacing.x;
+                                ui.spacing_mut().item_spacing.x = 28.0;
+                                egui::ScrollArea::vertical()
+                                    .id_salt("model_fetch_scroll")
+                                    .max_height(row_h * 22.5)
+                                    .auto_shrink([false, true])
+                                    .scroll_bar_visibility(
+                                        egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                    )
+                                    .show(ui, |ui| {
+                                        ui.columns(cols, |columns| {
+                                            for (ci, column) in columns.iter_mut().enumerate() {
+                                                column.set_min_width(150.0);
+                                                for id in
+                                                    ids.iter().skip(ci * per_col).take(per_col)
                                                 {
-                                                    let mut row = ModelRow::new();
-                                                    row.id = id.clone();
-                                                    row.name = id.clone();
-                                                    row.source_format = Some(self.current_page);
-                                                    p.models.push(row);
+                                                    let mut checked =
+                                                        p.models.iter().any(|m| m.id.trim() == id);
+                                                    if column.checkbox(&mut checked, id).changed()
+                                                        && checked
+                                                    {
+                                                        let mut row = ModelRow::new();
+                                                        row.id = id.clone();
+                                                        row.name = id.clone();
+                                                        row.source_format = Some(self.current_page);
+                                                        p.models.push(row);
+                                                    }
                                                 }
                                             }
-                                        }
+                                        });
                                     });
-                                });
-                            ui.spacing_mut().item_spacing.x = prev_spacing_x;
-                        }
-                        Err(err) => {
-                            ui.label(
-                                egui::RichText::new(format!("获取失败：{}", err))
-                                    .color(egui::Color32::from_rgb(220, 90, 90)),
-                            );
+                                ui.spacing_mut().item_spacing.x = prev_spacing_x;
+                            }
+                            Err(err) => {
+                                ui.label(
+                                    egui::RichText::new(format!("获取失败：{}", err))
+                                        .color(egui::Color32::from_rgb(220, 90, 90)),
+                                );
+                            }
                         }
                     }
+                } else {
+                    ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
                 }
-            } else {
-                ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
-            }
             });
         }
         let mut rm: Option<usize> = None;
@@ -2007,10 +1991,7 @@ impl App {
                     });
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("id:").weak()),
-                    );
+                    field_label(ui, 120.0, "id:");
                     let id_resp = ui
                         .add(egui::TextEdit::singleline(&mut p.models[j].id).desired_width(120.0));
                     if !p.models[j].id.trim().is_empty()
@@ -2024,10 +2005,7 @@ impl App {
                         );
                     }
                     if show_model_name {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new("name:").weak()),
-                        );
+                        field_label(ui, 120.0, "name:");
                         ui.add(
                             egui::TextEdit::singleline(&mut p.models[j].name).desired_width(120.0),
                         );
@@ -2042,46 +2020,31 @@ impl App {
                         ui.checkbox(&mut p.models[j].store, "store");
                     }
                     if show_model_context {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new(context_label).weak()),
-                        );
+                        field_label(ui, 120.0, context_label);
                         numeric_text_edit(ui, &mut p.models[j].context, 53.0, "");
                     }
                     if show_model_output {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new(output_label).weak()),
-                        );
+                        field_label(ui, 120.0, output_label);
                         numeric_text_edit(ui, &mut p.models[j].output, 53.0, "");
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
                     if show_model_input {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new(input_label).weak()),
-                        );
+                        field_label(ui, 120.0, input_label);
                         ui.add(
                             egui::TextEdit::singleline(&mut p.models[j].modalities_input)
                                 .desired_width(80.0),
                         );
                     }
                     if show_oc {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new("modalities.output").weak()),
-                        );
+                        field_label(ui, 120.0, "modalities.output");
                         ui.add(
                             egui::TextEdit::singleline(&mut p.models[j].modalities_output)
                                 .desired_width(80.0),
                         );
                     }
                     if show_model_variants {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new(variants_label).weak()),
-                        );
+                        field_label(ui, 120.0, variants_label);
                     }
                     let current_variants = p.models[j].variants.clone();
                     let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
@@ -2162,7 +2125,7 @@ impl App {
             let prefix = format!("variant_open_{}_", p.key);
             self.variant_open.retain(|k| !k.starts_with(&prefix));
         }
-        ui.add_space(2.0);
+        ui.add_space(6.0);
         let show_new_model_key = format!("show_new_model_{}", p.key);
         let show_new_model = self.variant_open.contains(&show_new_model_key);
         let btn_text = if show_new_model {
@@ -2181,16 +2144,10 @@ impl App {
             }
         }
         if show_new_model {
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("id:").weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, "id:");
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.id).desired_width(120.0));
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("name:").weak()),
-                );
+                field_label(ui, 120.0, "name:");
                 ui.add(egui::TextEdit::singleline(&mut p.new_model.name).desired_width(120.0));
                 if show_oc || !show_dsh {
                     ui.checkbox(&mut p.new_model.reasoning, "reasoning");
@@ -2199,40 +2156,25 @@ impl App {
                     ui.checkbox(&mut p.new_model.tool_call, "tool_call");
                     ui.checkbox(&mut p.new_model.store, "store");
                 }
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(context_label).weak()),
-                );
+                field_label(ui, 120.0, context_label);
                 numeric_text_edit(ui, &mut p.new_model.context, 53.0, "");
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(output_label).weak()),
-                );
+                field_label(ui, 120.0, output_label);
                 numeric_text_edit(ui, &mut p.new_model.output, 53.0, "");
             });
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(input_label).weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, input_label);
                 ui.add(
                     egui::TextEdit::singleline(&mut p.new_model.modalities_input)
                         .desired_width(80.0),
                 );
                 if show_oc {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("modalities.output").weak()),
-                    );
+                    field_label(ui, 120.0, "modalities.output");
                     ui.add(
                         egui::TextEdit::singleline(&mut p.new_model.modalities_output)
                             .desired_width(80.0),
                     );
                 }
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(variants_label).weak()),
-                );
+                field_label(ui, 120.0, variants_label);
                 let current_variants = p.new_model.variants.clone();
                 let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                     Vec::new()
@@ -2317,21 +2259,15 @@ impl App {
         let input_label = if show_oc { "modalities.input" } else { "input" };
         let (variants_label, variant_names) = self.dialect_variants();
         ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new("key").weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, "key");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.key)
                         .hint_text("openai")
                         .desired_width(120.0),
                 );
                 if show_oc {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("npm").weak()),
-                    );
+                    field_label(ui, 120.0, "npm");
                     let npm_options = [
                         "",
                         "@ai-sdk/openai",
@@ -2362,10 +2298,7 @@ impl App {
                     }
                 }
                 if !show_oc {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("api").weak()),
-                    );
+                    field_label(ui, 120.0, "api");
                     // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
                     let api_options: &[&str] = if show_omp {
                         &[
@@ -2413,10 +2346,7 @@ impl App {
                 }
                 // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
                 if !show_oc && !show_dsh {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("compat").weak()),
-                    );
+                    field_label(ui, 120.0, "compat");
                     ui.checkbox(&mut self.new_provider.compat, "supportsDeveloperRole");
                     let requires_label = if show_omp {
                         "requiresReasoningContentForAllAssistantTurns"
@@ -2429,51 +2359,43 @@ impl App {
                     );
                 }
             });
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(base_label).weak()),
-                );
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, 120.0, base_label);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_provider.base_url)
                         .hint_text("https://api.openai.com/v1")
                         .desired_width(200.0),
                 );
-                ui.add_sized(
-                    [60.0, 24.0],
-                    egui::Label::new(egui::RichText::new(api_key_label).weak()),
-                );
+                field_label(ui, 120.0, api_key_label);
                 if show_dsh {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_provider.api_key_env)
                             .hint_text("DEEPSEEK_API_KEY")
                             .desired_width(192.0),
                     );
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("API Key").weak()),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_provider.api_key_secret)
-                            .hint_text("实际密钥")
-                            .desired_width(408.0),
+                    field_label(ui, 120.0, "API Key");
+                    secret_text_edit(
+                        ui,
+                        &mut self.new_provider.api_key_secret,
+                        &mut self.new_provider.show_api_key,
+                        408.0,
+                        "实际密钥",
                     );
                 } else {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_provider.api_key)
-                            .hint_text("sk-xxx")
-                            .desired_width(408.0),
+                    secret_text_edit(
+                        ui,
+                        &mut self.new_provider.api_key,
+                        &mut self.new_provider.show_api_key,
+                        408.0,
+                        "sk-xxx",
                     );
                 }
                 if show_oc {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(timeout_label).weak()),
-                    );
+                    field_label(ui, 120.0, timeout_label);
                     numeric_text_edit(ui, &mut self.new_provider.timeout, 70.0, "180000");
                 }
             });
-            ui.add_space(2.0);
+            ui.add_space(6.0);
             let mut fetch_request: Option<(String, String, String)> = None;
             let mut close_fetch = false;
             let mut latency_models: Option<(String, Vec<String>, String)> = None;
@@ -2554,12 +2476,14 @@ impl App {
                                 }
                                 Ok(models) => {
                                     let ids = models.clone();
-                                    ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
+                                    ui.label(
+                                        egui::RichText::new("勾选可新增未配置的模型：").weak(),
+                                    );
                                     // 与 provider 表单一致：最多 5 列、高度固定 22 行、内部滚动。
                                     let cols = ids.len().clamp(1, 5);
                                     let per_col = ids.len().div_ceil(cols);
-                                    let row_h = ui.spacing().interact_size.y
-                                        + ui.spacing().item_spacing.y;
+                                    let row_h =
+                                        ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
                                     let prev_spacing_x = ui.spacing().item_spacing.x;
                                     ui.spacing_mut().item_spacing.x = 28.0;
                                     egui::ScrollArea::vertical()
@@ -2573,10 +2497,8 @@ impl App {
                                             ui.columns(cols, |columns| {
                                                 for (ci, column) in columns.iter_mut().enumerate() {
                                                     column.set_min_width(150.0);
-                                                    for id in ids
-                                                        .iter()
-                                                        .skip(ci * per_col)
-                                                        .take(per_col)
+                                                    for id in
+                                                        ids.iter().skip(ci * per_col).take(per_col)
                                                     {
                                                         let mut checked = self
                                                             .new_provider
@@ -2655,18 +2577,12 @@ impl App {
                         });
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new("id:").weak()),
-                        );
+                        field_label(ui, 120.0, "id:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.new_provider.models[j].id)
                                 .desired_width(120.0),
                         );
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new("name:").weak()),
-                        );
+                        field_label(ui, 120.0, "name:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.new_provider.models[j].name)
                                 .desired_width(120.0),
@@ -2678,15 +2594,9 @@ impl App {
                             ui.checkbox(&mut self.new_provider.models[j].tool_call, "tool_call");
                             ui.checkbox(&mut self.new_provider.models[j].store, "store");
                         }
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new(context_label).weak()),
-                        );
+                        field_label(ui, 120.0, context_label);
                         numeric_text_edit(ui, &mut self.new_provider.models[j].context, 53.0, "");
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new(output_label).weak()),
-                        );
+                        field_label(ui, 120.0, output_label);
                         numeric_text_edit(ui, &mut self.new_provider.models[j].output, 53.0, "");
                     });
                 });
@@ -2697,7 +2607,7 @@ impl App {
             if let Some(j) = rm_new {
                 self.new_provider.models.remove(j);
             }
-            ui.add_space(2.0);
+            ui.add_space(6.0);
             let show_new_model_key = format!("new_provider_show_model_{}", self.new_provider.key);
             let show_new_model = self.variant_open.contains(&show_new_model_key);
             if ui
@@ -2716,18 +2626,12 @@ impl App {
             }
             if show_new_model {
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("id:").weak()),
-                    );
+                    field_label(ui, 120.0, "id:");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_provider.new_model.id)
                             .desired_width(120.0),
                     );
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new("name:").weak()),
-                    );
+                    field_label(ui, 120.0, "name:");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_provider.new_model.name)
                             .desired_width(120.0),
@@ -2739,22 +2643,13 @@ impl App {
                         ui.checkbox(&mut self.new_provider.new_model.tool_call, "tool_call");
                         ui.checkbox(&mut self.new_provider.new_model.store, "store");
                     }
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(context_label).weak()),
-                    );
+                    field_label(ui, 120.0, context_label);
                     numeric_text_edit(ui, &mut self.new_provider.new_model.context, 53.0, "");
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(output_label).weak()),
-                    );
+                    field_label(ui, 120.0, output_label);
                     numeric_text_edit(ui, &mut self.new_provider.new_model.output, 53.0, "");
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(input_label).weak()),
-                    );
+                    field_label(ui, 120.0, input_label);
                     ui.add(
                         egui::TextEdit::singleline(
                             &mut self.new_provider.new_model.modalities_input,
@@ -2762,10 +2657,7 @@ impl App {
                         .desired_width(80.0),
                     );
                     if show_oc {
-                        ui.add_sized(
-                            [60.0, 24.0],
-                            egui::Label::new(egui::RichText::new("modalities.output").weak()),
-                        );
+                        field_label(ui, 120.0, "modalities.output");
                         ui.add(
                             egui::TextEdit::singleline(
                                 &mut self.new_provider.new_model.modalities_output,
@@ -2773,10 +2665,7 @@ impl App {
                             .desired_width(80.0),
                         );
                     }
-                    ui.add_sized(
-                        [60.0, 24.0],
-                        egui::Label::new(egui::RichText::new(variants_label).weak()),
-                    );
+                    field_label(ui, 120.0, variants_label);
                     let current_variants = self.new_provider.new_model.variants.clone();
                     let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
                         Vec::new()
@@ -2843,15 +2732,24 @@ impl App {
                         self.providers.push(np);
                         self.new_provider = ProviderRow::new();
                         self.show_new_provider = false;
+                        self.clear_new_provider_state();
                         self.status = "已添加 provider".into();
                     }
                 }
                 if ui.button("取消").clicked() {
                     self.new_provider = ProviderRow::new();
                     self.show_new_provider = false;
+                    self.clear_new_provider_state();
                 }
             });
         });
+    }
+
+    /// 关闭新增 provider 表单时清理其测试/获取状态，避免下次打开残留旧结果。
+    fn clear_new_provider_state(&mut self) {
+        self.latency.remove(NEW_PROVIDER_FETCH_KEY);
+        self.model_fetch.remove(NEW_PROVIDER_FETCH_KEY);
+        self.model_fetch_open.remove(NEW_PROVIDER_FETCH_KEY);
     }
 
     fn reload(&mut self) {
@@ -3021,7 +2919,7 @@ impl App {
 
     /// 页头：本页保存按钮 + 写入路径。
     fn ui_page_header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let fmt = self.current_page;
             let target = self.page_save_path(fmt);
             let (path, kind, can_save) = match &target {
@@ -3035,7 +2933,8 @@ impl App {
             if ui
                 .add_enabled(
                     can_save,
-                    egui::Button::new(egui::RichText::new("保存").strong()),
+                    egui::Button::new(egui::RichText::new("保存").strong())
+                        .fill(ui.visuals().selection.bg_fill),
                 )
                 .clicked()
             {
@@ -3810,7 +3709,7 @@ mod compact_tests {
 
 #[cfg(test)]
 mod model_fetch_tests {
-    use super::parse_models_response;
+    use super::{parse_models_response, sanitize_network_error, App, chat_url};
 
     #[test]
     fn parse_openai_style_models() {
@@ -3847,5 +3746,66 @@ mod model_fetch_tests {
         let text = r#"{"data":[{"id":"a"},{"id":"a"},{"name":"b"},{"foo":"c"}]}"#;
         let ids = parse_models_response(text).unwrap();
         assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn models_url_openai_variants() {
+        assert_eq!(
+            App::models_url("https://api.openai.com/v1", "openai-completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            App::models_url("https://api.openai.com/v1/", "openai-completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            App::models_url("https://gw.example.com", "openai-completions"),
+            "https://gw.example.com/models"
+        );
+    }
+
+    #[test]
+    fn models_url_anthropic_uses_v1() {
+        assert_eq!(
+            App::models_url("https://api.anthropic.com", "anthropic-messages"),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            App::models_url("https://api.anthropic.com/v1", "anthropic-messages"),
+            "https://api.anthropic.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn chat_url_openai_and_anthropic() {
+        assert_eq!(
+            chat_url("https://api.openai.com/v1", "openai-completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://api.anthropic.com", "anthropic-messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn sanitize_network_error_strips_url_query() {
+        let msg = r#"connection failed: Connection refused (os error 10061) for URL "https://example.com/v1?key=sk-super-secret#frag""#;
+        let out = sanitize_network_error(msg);
+        assert!(!out.contains("sk-super-secret"), "泄露了 query: {}", out);
+        assert!(!out.contains('#'), "泄露了 fragment: {}", out);
+        assert!(out.contains("https://example.com/v1"));
+    }
+
+    #[test]
+    fn sanitize_network_error_passthrough_without_url() {
+        let msg = "dns error: failed to lookup address";
+        assert_eq!(sanitize_network_error(msg), msg);
+    }
+
+    #[test]
+    fn sanitize_network_error_url_no_query_untouched() {
+        let msg = r#"connection failed for URL "https://api.example.com/v1/models""#;
+        assert_eq!(sanitize_network_error(msg), msg);
     }
 }
