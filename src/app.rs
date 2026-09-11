@@ -672,15 +672,17 @@ impl App {
                     self.reload();
                 }
                 // 文件来源显示在原本“加载”按钮的位置；加载改为回车或“浏览”。
+                // 只显示“来源：”+ 各后端官方图标（名称见悬停提示）。
+                ui.label(egui::RichText::new("来源:").weak());
                 if let Some(icon) = self.icon_for(self.source_format) {
                     ui.add(
                         egui::Image::from_texture(icon)
-                            .fit_to_exact_size(egui::vec2(12.0, 12.0)),
-                    );
+                            .fit_to_exact_size(egui::vec2(14.0, 14.0)),
+                    )
+                    .on_hover_text(self.source_format.label());
+                } else {
+                    ui.label(egui::RichText::new(self.source_format.label()).weak());
                 }
-                ui.label(
-                    egui::RichText::new(format!("来源: {}", self.source_format.label())).weak(),
-                );
                 if ui.button("浏览").clicked() {
                     if let Some(p) = show_file_dialog() {
                         self.config_path = p;
@@ -3178,26 +3180,6 @@ impl App {
         let now = ui.ctx().input(|i| i.time);
         // 待保存文档：与 page_save_path / save_backend_to 相同路径与合并逻辑。
         let doc = self.preview_document();
-        ui.horizontal(|ui| {
-            ui.strong(format!("{} 待保存文档", self.current_page.label()));
-            match &doc {
-                Ok((path, _)) => {
-                    let clipped: String = path.chars().take(30).collect();
-                    let truncated = clipped.chars().count() < path.chars().count();
-                    let mut shown = clipped;
-                    if truncated {
-                        shown.push('…');
-                    }
-                    ui.label(egui::RichText::new(shown).weak().monospace())
-                        .on_hover_text(path);
-                }
-                Err(e) => {
-                    ui.colored_label(egui::Color32::from_rgb(220, 90, 90), format!("生成失败：{}", e))
-                        .on_hover_text(e);
-                }
-            }
-        });
-        ui.separator();
         // 失焦（未在编辑）时：组件状态实时重写为待保存文档。
         // 解析失败时保留用户文本，避免打断未完成的编辑。
         if !self.preview_focused && self.preview_parse_ok {
@@ -3207,75 +3189,79 @@ impl App {
                 }
             }
         }
-        // 自下而上布局：先排底部（行数），文本区占满剩余空间，
-        // 避免 ScrollArea::auto_shrink([false,false]) 吃满高度把底部行挤出可视区。
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            // 单个行数显示：光标所在行 / 总行数（保存为实时自动，无需按钮）。
-            let total_lines =
-                self.preview_draft.chars().filter(|c| *c == '\n').count() + 1;
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "第 {} / {} 行",
-                        self.preview_cursor_line, total_lines
-                    ))
-                    .small()
-                    .weak(),
+        // 顶部：标题 + 行数/总行数（不显示路径）。
+        let total_lines = self.preview_draft.chars().filter(|c| *c == '\n').count() + 1;
+        ui.horizontal(|ui| {
+            ui.strong("预览编辑");
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} / {} 行",
+                    self.preview_cursor_line, total_lines
+                ))
+                .small()
+                .weak(),
+            )
+            .on_hover_text("光标所在行 / 待保存文档总行数");
+            if let Err(e) = &doc {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 90, 90),
+                    "生成失败",
                 )
-                .on_hover_text("光标所在行 / 待保存文档总行数");
-            });
-            ui.separator();
-            // 文本框：占满剩余高度，内容超出时支持滚轮与滚动条拖动。
-            let text_width = (ui.available_width() - 14.0).max(120.0);
-            let mut edited = false;
-            let mut cursor_line: Option<usize> = None;
-            egui::ScrollArea::vertical()
-                .id_salt("preview_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let edit = egui::TextEdit::multiline(&mut self.preview_draft)
-                        .font(egui::TextStyle::Monospace)
-                        .code_editor()
-                        .desired_width(text_width)
-                        .desired_rows(24)
-                        .hint_text(
-                            "在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存",
-                        );
-                    // 用 show 而非 add：需要 output.cursor_range 计算光标所在行。
-                    let output = edit.show(ui);
-                    let resp = output.response;
-                    self.preview_focused = resp.has_focus();
-                    if let Some(range) = output.cursor_range {
-                        let idx = range.primary.ccursor.index;
-                        let line = self
-                            .preview_draft
-                            .chars()
-                            .take(idx)
-                            .filter(|c| *c == '\n')
-                            .count()
-                            + 1;
-                        cursor_line = Some(line);
-                    }
-                    if resp.changed() && self.preview_focused {
-                        edited = true;
-                    }
-                });
-            if let Some(line) = cursor_line {
-                self.preview_cursor_line = line;
-            }
-            // 编辑 → 实时解析并应用回组件状态（解析失败不写盘、不覆盖）。
-            if edited {
-                self.apply_preview_draft();
-                self.preview_dirty_at = Some(now);
-            }
-            // 防抖自动保存：解析成功且停止输入 0.8s 后写盘。
-            if let Some(at) = self.preview_dirty_at {
-                if now - at > 0.8 {
-                    self.preview_dirty_at = None;
-                    self.preview_autosave();
-                }
+                .on_hover_text(e);
             }
         });
+        ui.separator();
+        // 文本框：常规自上而下布局的最后一个元素，占满剩余高度，
+        // 滚轮/滚动条均正常（用 bottom_up 会把滚动错位到底部）。
+        let text_width = (ui.available_width() - 14.0).max(120.0);
+        let mut edited = false;
+        let mut cursor_line: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("preview_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let edit = egui::TextEdit::multiline(&mut self.preview_draft)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .desired_width(text_width)
+                    .desired_rows(24)
+                    .hint_text(
+                        "在此直接编辑：改动实时应用到左侧组件，停止输入约 0.8s 后自动保存",
+                    );
+                // 用 show 而非 add：需要 output.cursor_range 计算光标所在行。
+                let output = edit.show(ui);
+                let resp = output.response;
+                self.preview_focused = resp.has_focus();
+                if let Some(range) = output.cursor_range {
+                    let idx = range.primary.ccursor.index;
+                    let line = self
+                        .preview_draft
+                        .chars()
+                        .take(idx)
+                        .filter(|c| *c == '\n')
+                        .count()
+                        + 1;
+                    cursor_line = Some(line);
+                }
+                if resp.changed() && self.preview_focused {
+                    edited = true;
+                }
+            });
+        if let Some(line) = cursor_line {
+            self.preview_cursor_line = line;
+        }
+        // 编辑 → 实时解析并应用回组件状态（解析失败不写盘、不覆盖）。
+        if edited {
+            self.apply_preview_draft();
+            self.preview_dirty_at = Some(now);
+        }
+        // 防抖自动保存：解析成功且停止输入 0.8s 后写盘。
+        if let Some(at) = self.preview_dirty_at {
+            if now - at > 0.8 {
+                self.preview_dirty_at = None;
+                self.preview_autosave();
+            }
+        }
     }
 
     /// 生成当前页面「待保存文档」：目标路径 + 序列化内容。
