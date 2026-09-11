@@ -43,7 +43,7 @@ impl Theme {
     /// Builds a full Style (theme visuals + shared spacing/rounding) and applies it.
     pub fn apply(&self, ctx: &egui::Context) {
         let mut style = egui::Style::default();
-        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.item_spacing = egui::vec2(5.0, 8.0);
         style.spacing.button_padding = egui::vec2(14.0, 3.0);
         style.spacing.interact_size.y = 18.0;
         style.spacing.scroll.bar_outer_margin = 0.0;
