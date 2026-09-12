@@ -27,6 +27,10 @@ cargo build --release
 - **oh-my-pi 页**：`baseUrl` / `apiKey` / `api` 下拉（omp 官方 9 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinking.efforts`（minimal…max）
 - **DeepSeek Harness 页**：`baseURL` / `apiKeyEnv` + 实际密钥 / `api` 下拉 / `timeoutMs` / `retryPolicy.mode` / `retryPolicy.maxRetries` / `models`（`id` / `name` / `contextWindow` / `maxTokens` / `input` / `reasoningEfforts`）
 
+协议（`npm` / `api`）四页共用同一份数据，口径统一走 `ProviderRow::effective_api()`：
+`npm` 非空按 npm 包推导 → `api` 非空直接用 → 原文件的 `api` → 都没有则按兼容层 `openai-completions`。
+下拉首项「(空)」表示不指定协议（`npm` 与 `api` 都清空，写盘时按兼容层处理），与 opencode 页 `npm` 的空选项同义且跨页同步。
+
 ## 获取模型
 
 每个 provider 卡片与「新增 Provider」弹窗的 Models 标题右侧都有「获取模型」按钮，按 provider 的 api 类型请求模型列表并弹层展示：
@@ -37,8 +41,23 @@ cargo build --release
 
 ## 延迟 / 连通性测试
 
+测试请求的端点、鉴权与请求体都按所选协议构造（不再一律打 `chat/completions`）：
+
+| 协议 | 模型延迟端点 | 鉴权 |
+| --- | --- | --- |
+| `openai-completions` / `mistral-conversations` | `POST {base}/chat/completions` | `Authorization: Bearer` |
+| `openai-responses` / `openai-codex-responses` | `POST {base}/responses` | `Authorization: Bearer` |
+| `azure-openai-responses` | `POST {base}/responses` | `api-key` |
+| `anthropic-messages` | `POST {base}/v1/messages` | `x-api-key` + `anthropic-version` |
+| `google-generative-ai` | `POST {base}/models/{model}:generateContent` | `?key=` 查询参数 |
+| `google-vertex` | `POST {base}/publishers/google/models/{model}:generateContent` | `Authorization: Bearer` |
+| `pi-messages` | `POST {base}/messages` | `Authorization: Bearer` |
+| `google-gemini-cli` / `bedrock-converse-stream` | 不支持 | 需专有签名 / 私有网关 |
+
 - **厂商连通性**：Providers 标题行右侧「连通性测试」按钮，一键测试当前页面全部厂商，耗时显示在各厂商卡片名字右侧（失败显示错误码，悬停看完整错误）；卡片收起时依然可见
-- **模型延迟**：每个 provider 的 Models 标题右侧「模型延迟」按钮，并发测试该 provider 的全部模型，结果显示在模型卡片头部，并实时显示测试进度；超时 8 秒
+- **模型延迟**：每个 provider 的 Models 标题右侧「模型延迟」按钮，并发测试该 provider 的全部模型（每批 8 个），结果显示在模型卡片头部，并实时显示测试进度
+- 超时判定 10 秒；耗时着色：<5 秒绿色、5~10 秒黄色、>10 秒红色；测试中显示乱码动画
+- 不支持自动测试的协议直接报错提示，不发无意义的请求
 - 测试会消耗极少量 token（单条最短对话），请勿在计费敏感的账号上频繁测试
 
 ## 配置预览 / 编辑面板
