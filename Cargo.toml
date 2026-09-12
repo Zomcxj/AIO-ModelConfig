@@ -9,23 +9,26 @@ name = "ModelHarbor"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.31", features = ["default"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 raw-window-handle = "0.6"
 serde_yaml_ng = "0.10.0"
 ureq = { version = "2", default-features = true }
 
+# eframe 0.34 起是 egui 1.0 级重构（SidePanel/TopBottomPanel 被删除、
+# App::update 改为 App::ui），因此在 0.33 线保持；默认特性已含 glow，不含 wgpu。
+eframe = { version = "0.33", features = ["default"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
 ]}
-rfd = "0.15"
+rfd = "0.17"
 
 [build-dependencies]
-winres = "0.1"
+winresource = "0.1"
 
 [profile.release]
 opt-level = "z"

@@ -37,11 +37,11 @@ pub fn card_frame<R>(
 pub fn field_label(ui: &mut egui::Ui, max_width: f32, text: impl Into<String>) -> egui::Response {
     let text = text.into();
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let text_width = ui.fonts(|f| {
-        f.layout_no_wrap(text.clone(), font, egui::Color32::WHITE)
-            .size()
-            .x
-    });
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(text.clone(), font, egui::Color32::WHITE)
+        .size()
+        .x;
     let width = text_width.min(max_width);
     let label = egui::Label::new(egui::RichText::new(text.as_str()).weak()).truncate();
     let resp = ui

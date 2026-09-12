@@ -58,7 +58,7 @@ print("icon ready:", len(img.tobytes()))
         std::fs::write("assets/icon_rgba.bin", &big_rgba).unwrap();
     }
 
-    let mut res = winres::WindowsResource::new();
+    let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/icon.ico");
     res.compile().unwrap();
 }

@@ -855,7 +855,7 @@ impl eframe::App for App {
         // 右侧配置预览/编辑面板：宽度由 preview_ratio 控制（拖动左边缘分隔条调整），
         // 窗口缩放时按该比例适配；窄窗口下限 220px，并保证组件区至少 320px。
         if self.show_preview {
-            let screen_w = ctx.screen_rect().width().max(1.0);
+            let screen_w = ctx.content_rect().width().max(1.0);
             let max_w = (screen_w - 320.0).max(220.0);
             let preview_w = (screen_w * self.preview_ratio).clamp(220.0, max_w);
             let side = egui::SidePanel::right("preview_panel")
@@ -870,7 +870,10 @@ impl eframe::App for App {
             self.ui_page_header(ui);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
-                .drag_to_scroll(false)
+                .scroll_source(egui::scroll_area::ScrollSource {
+                    drag: false,
+                    ..egui::scroll_area::ScrollSource::ALL
+                })
                 .show(ui, |ui| {
                     ui.add_space(4.0);
                     // Agents 仅属于 opencode 页面；区块标题吸顶，滚动时始终显示在顶部。
@@ -1015,16 +1018,9 @@ impl App {
                     ui.separator();
                     ui.label("主题:");
                     let theme_btn = ui.button(self.theme.label());
-                    let popup_id = ui.make_persistent_id("theme_popup");
-                    if theme_btn.clicked() {
-                        ui.memory_mut(|m| m.toggle_popup(popup_id));
-                    }
-                    egui::popup_below_widget(
-                        ui,
-                        popup_id,
-                        &theme_btn,
-                        egui::PopupCloseBehavior::CloseOnClick,
-                        |ui| {
+                    egui::Popup::menu(&theme_btn)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                        .show(|ui| {
                             ui.set_min_width(80.0);
                             for t in Theme::ALL {
                                 if ui.selectable_label(self.theme == t, t.label()).clicked() {
@@ -3774,7 +3770,8 @@ impl App {
             .min(find_matches.len().saturating_sub(1));
         let find_jump = self.preview_find_jump.take();
         let syntax = self.preview_syntax(&self.preview_draft);
-        let mut layouter = move |ui: &egui::Ui, text: &str, wrap_width: f32| {
+        let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+            let text = text.as_str();
             let font_id = egui::TextStyle::Monospace.resolve(ui.style());
             let mut job = egui::text::LayoutJob::default();
             // 自适应换行：使用 TextEdit 传入的换行宽度，长行不再溢出面板。
@@ -3809,7 +3806,7 @@ impl App {
             if !find_matches.is_empty() {
                 apply_find_background(&mut job, &find_matches, find_current);
             }
-            ui.fonts(|f| f.layout_job(job))
+            ui.painter().layout_job(job)
         };
         egui::ScrollArea::vertical()
             .id_salt("preview_scroll")
