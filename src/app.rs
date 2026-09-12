@@ -481,13 +481,25 @@ struct LatencyState {
     /// 模型级测试进度：已完成 / 总数。
     done: usize,
     total: usize,
+    /// 本次测试中尚未返回结果的模型 id（用于显示测试中的乱码动画）。
+    pending: HashSet<String>,
 }
+
+/// 延迟测试的读取超时与「超时」判定阈值（毫秒）。
+const LATENCY_TIMEOUT_MS: u64 = 10_000;
+/// 延迟着色阈值（毫秒）：低于此值为绿色。
+const LATENCY_GOOD_MS: u64 = 5_000;
+
+/// 延迟配色：<5s 绿色、5~10s 黄色、>10s 红色（超时）。
+const LATENCY_GREEN: egui::Color32 = egui::Color32::from_rgb(90, 180, 110);
+const LATENCY_YELLOW: egui::Color32 = egui::Color32::from_rgb(201, 162, 39);
+const LATENCY_RED: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
 
 /// 延迟测试用的 HTTP 客户端（较短超时，避免卡住 UI 线程池）。
 fn latency_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(std::time::Duration::from_secs(30))
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_millis(LATENCY_TIMEOUT_MS))
         .build()
 }
 
@@ -500,97 +512,284 @@ fn http_error(err: ureq::Error, elapsed: u64) -> String {
     }
 }
 
+fn latency_color(ms: u64) -> egui::Color32 {
+    if ms < LATENCY_GOOD_MS {
+        LATENCY_GREEN
+    } else if ms <= LATENCY_TIMEOUT_MS {
+        LATENCY_YELLOW
+    } else {
+        LATENCY_RED
+    }
+}
+
+/// 延迟测试进行中的「乱码」动画字符集（半角片假名 + 数字，参考 MemoPaws 密钥页）。
+const MATRIX_CHARS: &str = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789";
+/// 乱码动画每帧时长（毫秒）与每行字符数。
+const MATRIX_FRAME_MS: u64 = 70;
+const MATRIX_LEN: usize = 8;
+
+/// 生成一帧乱码：同一帧号 + 同一 salt 结果稳定（不保存随机状态）。
+fn matrix_glyphs(frame: u64, salt: &str, len: usize) -> String {
+    let mut state = 0xcbf2_9ce4_8422_2325u64 ^ frame.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for byte in salt.as_bytes() {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let chars: Vec<char> = MATRIX_CHARS.chars().collect();
+    let mut out = String::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push(chars[(state % chars.len() as u64) as usize]);
+    }
+    out
+}
+
+/// 测试进行中的乱码标签：每帧换一组字符，并请求下一次重绘。
+fn matrix_label(ui: &mut egui::Ui, salt: &str) {
+    let frame = (ui.ctx().input(|i| i.time) * 1000.0 / MATRIX_FRAME_MS as f64) as u64;
+    ui.label(
+        egui::RichText::new(matrix_glyphs(frame, salt, MATRIX_LEN))
+            .monospace()
+            .color(LATENCY_GREEN),
+    )
+    .on_hover_text("延迟测试进行中");
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(MATRIX_FRAME_MS));
+}
+
+/// 模型行延迟显示：测试中显示乱码动画，完成后按阈值着色。
+fn model_latency_label(ui: &mut egui::Ui, state: Option<&LatencyState>, model_id: &str) {
+    let Some(state) = state else {
+        return;
+    };
+    match state.models.get(model_id) {
+        Some(Ok(ms)) => {
+            ui.label(egui::RichText::new(format!("{}ms", ms)).color(latency_color(*ms)));
+        }
+        Some(Err(err)) => {
+            ui.label(egui::RichText::new(short_err(err)).color(LATENCY_RED))
+                .on_hover_text(err);
+        }
+        None if state.pending.contains(model_id) => matrix_label(ui, model_id),
+        None => {}
+    }
+}
+
+/// 线上协议（api）的调用形状：端点、鉴权与最小请求体各不相同。
+/// 未列出的值按 OpenAI Chat Completions 兼容层处理，与 [`crate::convert::npm_to_api`] 的口径一致。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ApiWire {
+    /// `openai-completions` / `mistral-conversations` / 未知值。
+    ChatCompletions,
+    /// `openai-responses` / `openai-codex-responses`。
+    Responses,
+    /// `azure-openai-responses`（鉴权头为 `api-key`）。
+    AzureResponses,
+    /// `anthropic-messages`。
+    AnthropicMessages,
+    /// `google-generative-ai`（密钥走 `?key=` 查询参数）。
+    GoogleGenerativeAi,
+    /// `google-vertex`（Bearer + `publishers/google` 路径）。
+    GoogleVertex,
+    /// `pi-messages`。
+    PiMessages,
+    /// 需要专有签名或私有网关，无法用最小请求测延迟。
+    Unsupported,
+}
+
+/// 请求鉴权方式。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AuthKind {
+    /// `Authorization: Bearer <key>`。
+    Bearer,
+    /// `x-api-key` + `anthropic-version`。
+    AnthropicKey,
+    /// Azure OpenAI 的 `api-key`。
+    AzureKey,
+    /// 密钥已放进 URL 查询参数（Google 系），不再加鉴权头。
+    QueryKey,
+}
+
+fn api_wire(api: &str) -> ApiWire {
+    match api.trim() {
+        "anthropic-messages" => ApiWire::AnthropicMessages,
+        "openai-responses" | "openai-codex-responses" => ApiWire::Responses,
+        "azure-openai-responses" => ApiWire::AzureResponses,
+        "google-generative-ai" => ApiWire::GoogleGenerativeAi,
+        "google-vertex" => ApiWire::GoogleVertex,
+        "pi-messages" => ApiWire::PiMessages,
+        // 这两个需要专有签名 / 私有网关（SigV4、CloudCode），最小请求测不出真实可用性。
+        "bedrock-converse-stream" | "google-gemini-cli" => ApiWire::Unsupported,
+        _ => ApiWire::ChatCompletions,
+    }
+}
+
+fn auth_kind(wire: ApiWire) -> AuthKind {
+    match wire {
+        ApiWire::AnthropicMessages => AuthKind::AnthropicKey,
+        ApiWire::AzureResponses => AuthKind::AzureKey,
+        ApiWire::GoogleGenerativeAi | ApiWire::GoogleVertex => AuthKind::QueryKey,
+        _ => AuthKind::Bearer,
+    }
+}
+
+/// 该协议是否支持用最小请求测延迟 / 拉模型列表；不支持时给出原因。
+fn unsupported_reason(api: &str) -> Option<String> {
+    match api_wire(api) {
+        ApiWire::Unsupported => Some(format!(
+            "协议 {} 需要专有鉴权（签名 / 私有网关），暂不支持自动测试",
+            api.trim()
+        )),
+        _ => None,
+    }
+}
+
+/// 按鉴权方式给请求加鉴权头；`QueryKey` 的密钥已在 URL 里。
+fn apply_auth(request: ureq::Request, auth: AuthKind, secret: &str) -> ureq::Request {
+    match auth {
+        AuthKind::Bearer => request.set("Authorization", &format!("Bearer {}", secret)),
+        AuthKind::AnthropicKey => request
+            .set("x-api-key", secret)
+            .set("anthropic-version", "2023-06-01"),
+        AuthKind::AzureKey => request.set("api-key", secret),
+        AuthKind::QueryKey => request,
+    }
+}
+
+/// Google 系把密钥放查询参数；其余协议原样返回。
+fn with_query_key(url: &str, auth: AuthKind, secret: &str) -> String {
+    if auth == AuthKind::QueryKey && !secret.is_empty() {
+        format!("{}?key={}", url, secret)
+    } else {
+        url.to_string()
+    }
+}
+
 /// 测量 provider 模型列表接口的往返延迟（毫秒）。
 fn measure_provider_latency(url: &str, secret: &str, api: &str) -> Result<u64, String> {
+    if let Some(reason) = unsupported_reason(api) {
+        return Err(reason);
+    }
     if url.is_empty() {
         return Err("缺少 baseURL".to_string());
     }
     if secret.is_empty() {
         return Err("缺少 API Key".to_string());
     }
+    let auth = auth_kind(api_wire(api));
+    let target = with_query_key(url, auth, secret);
     let agent = latency_agent();
-    let mut request = agent
-        .get(url)
-        .set("User-Agent", "model-harbor")
-        .set("Accept", "application/json");
-    if api == "anthropic-messages" {
-        request = request
-            .set("x-api-key", secret)
-            .set("anthropic-version", "2023-06-01");
-    } else {
-        request = request.set("Authorization", &format!("Bearer {}", secret));
-    }
+    let request = apply_auth(
+        agent
+            .get(&target)
+            .set("User-Agent", "model-harbor")
+            .set("Accept", "application/json"),
+        auth,
+        secret,
+    );
     let started = std::time::Instant::now();
     let result = request.call();
     let elapsed = started.elapsed().as_millis() as u64;
+    if elapsed >= LATENCY_TIMEOUT_MS {
+        return Err(format!("超时（{} ms）", elapsed));
+    }
     match result {
         Ok(_) => Ok(elapsed),
         Err(err) => Err(http_error(err, elapsed)),
     }
 }
 
-/// 模型对话接口地址（用于最小请求延迟测试）。
-fn chat_url(base_url: &str, api: &str) -> String {
+/// 最小对话请求的地址：按协议决定路径（Google 系需要模型名参与路径）。
+fn chat_url(base_url: &str, api: &str, model: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
-    if api == "anthropic-messages" {
-        if base.ends_with("/v1") {
-            format!("{}/messages", base)
-        } else {
-            format!("{}/v1/messages", base)
+    let model = model.trim();
+    match api_wire(api) {
+        ApiWire::AnthropicMessages => {
+            if base.ends_with("/v1") {
+                format!("{}/messages", base)
+            } else {
+                format!("{}/v1/messages", base)
+            }
         }
-    } else {
-        format!("{}/chat/completions", base)
+        ApiWire::Responses | ApiWire::AzureResponses => format!("{}/responses", base),
+        ApiWire::GoogleGenerativeAi => format!("{}/models/{}:generateContent", base, model),
+        ApiWire::GoogleVertex => {
+            format!(
+                "{}/publishers/google/models/{}:generateContent",
+                base, model
+            )
+        }
+        ApiWire::PiMessages => format!("{}/messages", base),
+        ApiWire::ChatCompletions | ApiWire::Unsupported => format!("{}/chat/completions", base),
+    }
+}
+
+/// 最小请求体：内容固定为 `ping`，按协议取字段名（token 上限给到最小可用值）。
+fn minimal_body(wire: ApiWire, model: &str) -> Value {
+    match wire {
+        ApiWire::Responses | ApiWire::AzureResponses => serde_json::json!({
+            "model": model,
+            "max_output_tokens": 16,
+            "input": "ping"
+        }),
+        ApiWire::GoogleGenerativeAi | ApiWire::GoogleVertex => serde_json::json!({
+            "contents": [{ "role": "user", "parts": [{ "text": "ping" }] }],
+            "generationConfig": { "maxOutputTokens": 1 }
+        }),
+        ApiWire::AnthropicMessages | ApiWire::PiMessages => serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "ping" }]
+        }),
+        ApiWire::ChatCompletions | ApiWire::Unsupported => serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "stream": false,
+            "messages": [{ "role": "user", "content": "ping" }]
+        }),
     }
 }
 
 /// 对单个模型发一个最小请求，测量往返延迟（毫秒）。
-/// max_tokens=1 使消耗最小；失败仍会报出耗时，便于判断服务是否可达。
+/// 端点、鉴权与请求体都按所选协议构造；失败仍会报出耗时，便于判断服务是否可达。
 fn measure_model_latency(
     base_url: &str,
     secret: &str,
     api: &str,
     model: &str,
 ) -> Result<u64, String> {
+    if let Some(reason) = unsupported_reason(api) {
+        return Err(reason);
+    }
     if base_url.trim().is_empty() {
         return Err("缺少 baseURL".to_string());
     }
     if secret.is_empty() {
         return Err("缺少 API Key".to_string());
     }
-    let url = chat_url(base_url, api);
-    // 模型延迟测试的读取超时固定 8 秒：超过即视为超时。
+    let wire = api_wire(api);
+    let auth = auth_kind(wire);
+    let url = with_query_key(&chat_url(base_url, api, model), auth, secret);
+    let body = minimal_body(wire, model).to_string();
+    // 模型延迟测试的读取超时固定为 LATENCY_TIMEOUT_MS：超过即视为超时。
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout_read(std::time::Duration::from_millis(8000))
+        .timeout_read(std::time::Duration::from_millis(LATENCY_TIMEOUT_MS))
         .build();
     let started = std::time::Instant::now();
-    let result = if api == "anthropic-messages" {
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "ping"}]
-        });
+    let result = apply_auth(
         agent
             .post(&url)
-            .set("x-api-key", secret)
-            .set("anthropic-version", "2023-06-01")
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-    } else {
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 1,
-            "stream": false,
-            "messages": [{"role": "user", "content": "ping"}]
-        });
-        agent
-            .post(&url)
-            .set("Authorization", &format!("Bearer {}", secret))
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-    };
+            .set("User-Agent", "model-harbor")
+            .set("Content-Type", "application/json"),
+        auth,
+        secret,
+    )
+    .send_string(&body);
     let elapsed = started.elapsed().as_millis() as u64;
-    if elapsed >= 8000 {
+    if elapsed >= LATENCY_TIMEOUT_MS {
         return Err(format!("超时（{} ms）", elapsed));
     }
     match result {
@@ -601,27 +800,29 @@ fn measure_model_latency(
 
 /// 调用 OpenAI 兼容 /models 接口获取模型 id 列表（后台线程内执行）。
 fn fetch_models_remote(url: &str, secret: &str, api: &str) -> Result<Vec<String>, String> {
+    if let Some(reason) = unsupported_reason(api) {
+        return Err(reason);
+    }
     if url.is_empty() {
         return Err("缺少 baseURL，无法获取模型".to_string());
     }
     if secret.is_empty() {
         return Err("缺少 API Key，无法获取模型".to_string());
     }
+    let auth = auth_kind(api_wire(api));
+    let target = with_query_key(url, auth, secret);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(std::time::Duration::from_secs(30))
         .build();
-    let mut request = agent
-        .get(url)
-        .set("User-Agent", "model-harbor")
-        .set("Accept", "application/json");
-    if api == "anthropic-messages" {
-        request = request
-            .set("x-api-key", secret)
-            .set("anthropic-version", "2023-06-01");
-    } else {
-        request = request.set("Authorization", &format!("Bearer {}", secret));
-    }
+    let request = apply_auth(
+        agent
+            .get(&target)
+            .set("User-Agent", "model-harbor")
+            .set("Accept", "application/json"),
+        auth,
+        secret,
+    );
     let response = request.call().map_err(|err| match err {
         ureq::Error::Status(code, resp) => format!("HTTP {}：{}", code, resp.status_text()),
         ureq::Error::Transport(transport) => format!(
@@ -1926,15 +2127,18 @@ impl App {
         if base.is_empty() {
             return String::new();
         }
-        if api == "anthropic-messages" {
+        match api_wire(api) {
             // Anthropic 的模型接口固定为 /v1/models。
-            if base.ends_with("/v1") {
-                format!("{}/models", base)
-            } else {
-                format!("{}/v1/models", base)
+            ApiWire::AnthropicMessages => {
+                if base.ends_with("/v1") {
+                    format!("{}/models", base)
+                } else {
+                    format!("{}/v1/models", base)
+                }
             }
-        } else {
-            format!("{}/models", base)
+            // Vertex 的模型列表挂在 publishers/google 下。
+            ApiWire::GoogleVertex => format!("{}/publishers/google/models", base),
+            _ => format!("{}/models", base),
         }
     }
 
@@ -1996,6 +2200,7 @@ impl App {
         let api = api.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         let total = models.len();
+        let pending: HashSet<String> = models.iter().map(|m| m.trim().to_string()).collect();
         std::thread::spawn(move || {
             const BATCH: usize = 8;
             for chunk in models.chunks(BATCH) {
@@ -2017,6 +2222,7 @@ impl App {
         state.models.clear();
         state.done = 0;
         state.total = total;
+        state.pending = pending;
         state.model_rx = Some(rx);
         None
     }
@@ -2048,6 +2254,7 @@ impl App {
                 loop {
                     match rx.try_recv() {
                         Ok((id, result)) => {
+                            state.pending.remove(&id);
                             state.models.insert(id, result);
                             state.done += 1;
                         }
@@ -2055,6 +2262,8 @@ impl App {
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             state.model_rx = None;
                             state.total = state.done;
+                            // 线程异常退出时不会有结果回传：清掉等待动画。
+                            state.pending.clear();
                             notices.push(format!(
                                 "模型延迟测试完成（{}/{}）",
                                 state.done, state.total
@@ -2315,21 +2524,18 @@ impl App {
                 // 连通性测试结果：显示在厂商名字右侧，卡片收起时也可见。
                 if let Some(state) = self.latency.get(&key) {
                     if state.provider_rx.is_some() {
-                        ui.add(egui::Spinner::new().size(12.0));
+                        matrix_label(ui, &key);
                     } else if let Some(res) = &state.provider {
                         match res {
                             Ok(ms) => {
                                 ui.label(
                                     egui::RichText::new(format!("{}ms", ms))
-                                        .color(egui::Color32::from_rgb(90, 180, 110)),
+                                        .color(latency_color(*ms)),
                                 );
                             }
                             Err(err) => {
-                                ui.label(
-                                    egui::RichText::new(short_err(err))
-                                        .color(egui::Color32::from_rgb(220, 90, 90)),
-                                )
-                                .on_hover_text(err);
+                                ui.label(egui::RichText::new(short_err(err)).color(LATENCY_RED))
+                                    .on_hover_text(err);
                             }
                         }
                     }
@@ -2558,25 +2764,9 @@ impl App {
                         model_drag_stopped = true;
                     }
                     // 该行显示延迟（拖动按钮右侧），删除按钮右对齐。
-                    if let Some(state) = self.latency.get(&p.key) {
-                        if let Some(res) = state.models.get(p.models[j].id.trim()) {
-                            match res {
-                                Ok(ms) => {
-                                    ui.label(
-                                        egui::RichText::new(format!("{}ms", ms))
-                                            .color(egui::Color32::from_rgb(90, 180, 110)),
-                                    );
-                                }
-                                Err(err) => {
-                                    ui.label(
-                                        egui::RichText::new(short_err(err))
-                                            .color(egui::Color32::from_rgb(220, 90, 90)),
-                                    )
-                                    .on_hover_text(err);
-                                }
-                            }
-                        }
-                    }
+                    let latency = self.latency.get(&p.key);
+                    let model_id = p.models[j].id.trim().to_string();
+                    model_latency_label(ui, latency, &model_id);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("删").clicked() {
                             rm = Some(j);
@@ -2931,27 +3121,9 @@ impl App {
                             move_new_request = Some((j, j + 1));
                         }
                         // 该行显示延迟（调整按钮右侧），删除按钮右对齐。
-                        if let Some(state) = self.latency.get(NEW_PROVIDER_FETCH_KEY) {
-                            if let Some(res) =
-                                state.models.get(self.new_provider.models[j].id.trim())
-                            {
-                                match res {
-                                    Ok(ms) => {
-                                        ui.label(
-                                            egui::RichText::new(format!("{}ms", ms))
-                                                .color(egui::Color32::from_rgb(90, 180, 110)),
-                                        );
-                                    }
-                                    Err(err) => {
-                                        ui.label(
-                                            egui::RichText::new(short_err(err))
-                                                .color(egui::Color32::from_rgb(220, 90, 90)),
-                                        )
-                                        .on_hover_text(err);
-                                    }
-                                }
-                            }
-                        }
+                        let latency = self.latency.get(NEW_PROVIDER_FETCH_KEY);
+                        let model_id = self.new_provider.models[j].id.trim().to_string();
+                        model_latency_label(ui, latency, &model_id);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("删").clicked() {
                                 rm_new = Some(j);
@@ -4546,12 +4718,121 @@ mod model_fetch_tests {
     #[test]
     fn chat_url_openai_and_anthropic() {
         assert_eq!(
-            chat_url("https://api.openai.com/v1", "openai-completions"),
+            chat_url("https://api.openai.com/v1", "openai-completions", "gpt-4o"),
             "https://api.openai.com/v1/chat/completions"
         );
         assert_eq!(
-            chat_url("https://api.anthropic.com", "anthropic-messages"),
+            chat_url(
+                "https://api.anthropic.com",
+                "anthropic-messages",
+                "claude-sonnet-4"
+            ),
             "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn chat_url_follows_selected_protocol() {
+        let base = "https://gw.example.com/v1";
+        // Responses 系走 /responses（含 Azure）
+        assert_eq!(
+            chat_url(base, "openai-responses", "gpt-4o"),
+            "https://gw.example.com/v1/responses"
+        );
+        assert_eq!(
+            chat_url(base, "azure-openai-responses", "gpt-4o"),
+            "https://gw.example.com/v1/responses"
+        );
+        // Mistral 会话协议仍是 chat/completions
+        assert_eq!(
+            chat_url(base, "mistral-conversations", "mistral-large"),
+            "https://gw.example.com/v1/chat/completions"
+        );
+        // pi 自己的协议是 /messages（不带 v1 前缀时也直接用 base）
+        assert_eq!(
+            chat_url(base, "pi-messages", "some-model"),
+            "https://gw.example.com/v1/messages"
+        );
+        // Google 系需要模型名参与路径
+        assert_eq!(
+            chat_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "google-generative-ai",
+                "gemini-2.5-pro"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+        );
+        assert_eq!(
+            chat_url(
+                "https://us-central1-aiplatform.googleapis.com/v1",
+                "google-vertex",
+                "gemini-2.5-pro"
+            ),
+            "https://us-central1-aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent"
+        );
+    }
+
+    #[test]
+    fn api_wire_classifies_and_flags_unsupported() {
+        use super::{api_wire, auth_kind, unsupported_reason, ApiWire, AuthKind};
+        // 未知值与空值都归到兼容层，不会漏掉协议分支
+        assert_eq!(api_wire("openai-completions"), ApiWire::ChatCompletions);
+        assert_eq!(api_wire("unknown-api"), ApiWire::ChatCompletions);
+        assert_eq!(api_wire(""), ApiWire::ChatCompletions);
+        assert_eq!(api_wire("openai-codex-responses"), ApiWire::Responses);
+        assert_eq!(api_wire("anthropic-messages"), ApiWire::AnthropicMessages);
+        assert_eq!(api_wire("pi-messages"), ApiWire::PiMessages);
+        // 鉴权方式随协议变化
+        assert_eq!(
+            auth_kind(api_wire("anthropic-messages")),
+            AuthKind::AnthropicKey
+        );
+        assert_eq!(
+            auth_kind(api_wire("azure-openai-responses")),
+            AuthKind::AzureKey
+        );
+        assert_eq!(
+            auth_kind(api_wire("google-generative-ai")),
+            AuthKind::QueryKey
+        );
+        assert_eq!(auth_kind(api_wire("openai-responses")), AuthKind::Bearer);
+        // 需要专有鉴权的协议提前报错，不发无意义的请求
+        assert!(unsupported_reason("google-gemini-cli").is_some());
+        assert!(unsupported_reason("bedrock-converse-stream").is_some());
+        assert!(unsupported_reason("openai-completions").is_none());
+    }
+
+    #[test]
+    fn minimal_body_matches_protocol() {
+        use super::{api_wire, minimal_body};
+        let chat = minimal_body(api_wire("openai-completions"), "m");
+        assert_eq!(chat["messages"][0]["content"], "ping");
+        assert_eq!(chat["max_tokens"], 1);
+        let resp = minimal_body(api_wire("openai-responses"), "m");
+        assert_eq!(resp["input"], "ping");
+        assert_eq!(resp["max_output_tokens"], 16);
+        let google = minimal_body(api_wire("google-generative-ai"), "m");
+        assert_eq!(google["contents"][0]["parts"][0]["text"], "ping");
+        // 字段名不得互相串用（Responses 没有 messages，Google 没有 model）
+        assert!(resp.get("messages").is_none());
+        assert!(google.get("model").is_none());
+    }
+
+    #[test]
+    fn models_url_google_vertex_uses_publishers_path() {
+        assert_eq!(
+            App::models_url(
+                "https://us-central1-aiplatform.googleapis.com/v1",
+                "google-vertex"
+            ),
+            "https://us-central1-aiplatform.googleapis.com/v1/publishers/google/models"
+        );
+        assert_eq!(
+            App::models_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "google-generative-ai"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models"
         );
     }
 
