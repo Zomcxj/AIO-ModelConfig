@@ -43,6 +43,10 @@ struct ModelFetchState {
 
 /// 新增 Provider 表单使用固定的内部 key 保存获取状态。
 const NEW_PROVIDER_FETCH_KEY: &str = "__new_provider__";
+/// 预览编辑框的固定 id（切页时需要主动释放焦点，见 reset_preview_draft）。
+const PREVIEW_EDITOR_ID: &str = "preview_editor";
+/// 预览框内停止输入多久后，允许用组件状态重建草稿（秒）。
+const PREVIEW_EDIT_IDLE_SECS: f64 = 2.0;
 
 /// 吸顶标题占位：在内容流中预留标题行高度，返回绘制锚点。
 /// 必须与 [`sticky_end`] 配对，并在 section 内容渲染完成后调用 sticky_end，
@@ -937,6 +941,8 @@ pub struct App {
     preview_draft: String,
     /// 最近一次文本编辑的时间点（ctx 时间），用于防抖自动保存。
     preview_dirty_at: Option<f64>,
+    /// 用户最近一次在预览框内输入的帧时间（用于判断「正在手改预览」）。
+    preview_edit_at: Option<f64>,
     /// 最近一次文本解析是否成功（解析失败不写盘、不覆盖文本）。
     preview_parse_ok: bool,
     /// 最近一次预览文本解析失败的报错（成功时为 None），用于面板内红字提示。
@@ -1001,6 +1007,7 @@ impl Default for App {
             preview_focused: false,
             preview_draft: String::new(),
             preview_dirty_at: None,
+            preview_edit_at: None,
             preview_parse_ok: true,
             preview_parse_error: None,
             preview_find: String::new(),
@@ -1441,6 +1448,7 @@ impl App {
         self.latency.clear();
         // 加载后跳转到来源格式对应的页面
         self.current_page = self.source_format;
+        self.reset_preview_draft();
         self.refresh_targets();
     }
 
@@ -1485,6 +1493,10 @@ impl App {
                             self.sync_wsl = false;
                         }
                         self.current_page = id;
+                        // 切换页面后必须重建预览草稿：草稿只在「预览未聚焦且上次解析成功」时才
+                        // 跟随组件状态，否则会停留在上一页的内容上（预览框仍有焦点或上次解析失败）。
+                        self.reset_preview_draft();
+                        ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(PREVIEW_EDITOR_ID)));
                     }
                 }
                 ui.separator();
@@ -2458,10 +2470,7 @@ impl App {
                     self.show_preview = !self.show_preview;
                     if self.show_preview {
                         // 打开时以组件状态重建待保存文档
-                        self.preview_focused = false;
-                        self.preview_parse_ok = true;
-                        self.preview_parse_error = None;
-                        self.preview_dirty_at = None;
+                        self.reset_preview_draft();
                     }
                 }
             });
@@ -3710,15 +3719,32 @@ impl App {
         }
     }
 
+    /// 重置预览编辑状态，让草稿在下一帧按当前组件状态重建。
+    /// 切页/重新加载/打开预览时调用：草稿只在「预览未聚焦且上次解析成功」时
+    /// 才跟随组件状态，否则会停留在上一页的内容上。
+    fn reset_preview_draft(&mut self) {
+        self.preview_focused = false;
+        self.preview_parse_ok = true;
+        self.preview_parse_error = None;
+        self.preview_dirty_at = None;
+        self.preview_edit_at = None;
+    }
+
     /// 预览面板：右侧实时展示「待保存文档」（与保存按钮同路径、同合并语义）；
     /// 文本框始终可编辑：编辑内容实时解析并应用回组件，停止输入后自动写盘。
     fn ui_preview_panel(&mut self, ui: &mut egui::Ui) {
         let now = ui.ctx().input(|i| i.time);
         // 待保存文档：与 page_save_path / save_backend_to 相同路径与合并逻辑。
         let doc = self.preview_document();
-        // 失焦（未在编辑）时：组件状态实时重写为待保存文档。
-        // 解析失败时保留用户文本，避免打断未完成的编辑。
-        if !self.preview_focused && self.preview_parse_ok {
+        // 组件状态是「待保存文档」的唯一来源：只要用户没在预览框里手改（停止输入
+        // 超过 PREVIEW_EDIT_IDLE_SECS）且上次解析没失败，就按组件状态重建草稿。
+        // 不再依赖「预览是否持有焦点」—— 焦点残留或解析失败会让预览停在旧内容上，
+        // 用户再动一下预览还会把旧内容解析回组件，导致保存写回旧配置。
+        if preview_should_rebuild(
+            self.preview_parse_error.is_some(),
+            self.preview_edit_at,
+            now,
+        ) {
             if let Ok((_, text)) = &doc {
                 if text != &self.preview_draft {
                     self.preview_draft = text.clone();
@@ -3727,6 +3753,7 @@ impl App {
         }
         // 顶部：标题 + 行数/总行数（不显示路径）；格式报错直接排在行数右侧。
         let total_lines = self.preview_draft.chars().filter(|c| *c == '\n').count() + 1;
+        let mut regenerate = false;
         ui.horizontal(|ui| {
             ui.strong("预览编辑");
             ui.label(
@@ -3745,12 +3772,19 @@ impl App {
                     )
                     .wrap(),
                 )
-                .on_hover_text("继续编辑修正，或切走再切回以撤销文本修改");
+                .on_hover_text("继续编辑修正，或点「重新生成」/ 切走再切回以撤销文本修改");
+                regenerate = ui
+                    .button("重新生成")
+                    .on_hover_text("放弃预览里的修改，按左侧组件状态重新生成待保存文档")
+                    .clicked();
             } else if let Err(e) = &doc {
                 ui.colored_label(egui::Color32::from_rgb(220, 90, 90), "生成失败")
                     .on_hover_text(e);
             }
         });
+        if regenerate {
+            self.reset_preview_draft();
+        }
         ui.separator();
         // Ctrl+F：激活查找（读原始按键事件，避免被文本框消耗）。
         let ctrl_f = ui.input(|i| {
@@ -3894,6 +3928,7 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let edit = egui::TextEdit::multiline(&mut self.preview_draft)
+                    .id(egui::Id::new(PREVIEW_EDITOR_ID))
                     .font(egui::TextStyle::Monospace)
                     .code_editor()
                     .desired_width(text_width)
@@ -3946,6 +3981,7 @@ impl App {
         if edited {
             self.apply_preview_draft();
             self.preview_dirty_at = Some(now);
+            self.preview_edit_at = Some(now);
         }
         // 防抖自动保存：解析成功且停止输入 0.8s 后写盘。
         if let Some(at) = self.preview_dirty_at {
@@ -4075,6 +4111,13 @@ enum CompactRole {
 }
 
 /// 预览查找：大小写不敏感的字符级匹配，返回不重叠的字节区间。
+fn preview_should_rebuild(parse_failed: bool, edited_at: Option<f64>, now: f64) -> bool {
+    if parse_failed {
+        return false;
+    }
+    edited_at.is_none_or(|at| now - at >= PREVIEW_EDIT_IDLE_SECS)
+}
+
 fn find_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
     if query.is_empty() {
         return Vec::new();
