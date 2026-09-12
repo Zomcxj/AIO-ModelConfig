@@ -1323,6 +1323,27 @@ fn variant_selector(
     }
 }
 
+/// 「获取模型」面板的分栏参数：列间水平间距、单列最小宽度、最大列数。
+const FETCH_GRID_GAP_X: f32 = 28.0;
+const FETCH_GRID_MIN_COL_W: f32 = 150.0;
+const FETCH_GRID_MAX_COLS: usize = 5;
+
+/// 计算模型勾选面板的横向分栏：列数由**可用宽度**推出来（而非写死 5 列），列宽再把总宽
+/// 均分，所以 `列数 * 列宽 + 间距 * (列数 - 1)` 恒等于可用宽度，面板不会横向溢出。
+/// 返回 `(列数, 每列宽度)`。
+fn fetch_grid_columns(id_count: usize, avail_width: f32) -> (usize, f32) {
+    if id_count == 0 {
+        return (1, avail_width.max(1.0));
+    }
+    let max_cols = FETCH_GRID_MAX_COLS.min(id_count);
+    // 浮点转整数在 Rust 中是饱和转换（NaN -> 0），因此不会 panic；clamp 也只是兜底。
+    let cols = (((avail_width + FETCH_GRID_GAP_X) / (FETCH_GRID_MIN_COL_W + FETCH_GRID_GAP_X))
+        .floor() as usize)
+        .clamp(1, max_cols);
+    let col_w = ((avail_width - FETCH_GRID_GAP_X * (cols - 1) as f32) / cols as f32).max(1.0);
+    (cols, col_w)
+}
+
 /// 模型获取结果的勾选面板：勾选后把其中未配置的模型追加到 `models`。
 fn model_fetch_popup<H: std::hash::Hash>(
     ui: &mut egui::Ui,
@@ -1352,11 +1373,11 @@ fn model_fetch_popup<H: std::hash::Hash>(
         Ok(models_remote) => {
             let ids = models_remote.clone();
             ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
-            // 最多 5 列横向排列；区域高度固定为 22 行，每列超出部分在区域内垂直滚动查看。
-            // 注意：ScrollArea 内不能用 ui.columns —— columns 会把内容裁到当前可用高度，
+            // 区域高度固定为 22 行，每列超出部分在区域内垂直滚动查看。
+            // 注意 1：ScrollArea 内不能用 ui.columns —— columns 会把内容裁到当前可用高度，
             // 导致内容不进入滚动区、无法滚动。改为横向排布 + 纵向子列。
-            let cols = ids.len().clamp(1, 5);
-            let per_col = ids.len().div_ceil(cols);
+            // 注意 2：列数必须在滚动区**内部**按可用宽度计算，才能把「始终可见的滚动条」
+            // 占用的那一条宽度也扣掉，否则整块内容会向右溢出界面。
             let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
             egui::ScrollArea::vertical()
                 .id_salt(id_salt)
@@ -1364,14 +1385,23 @@ fn model_fetch_popup<H: std::hash::Hash>(
                 .auto_shrink([false, true])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
+                    let (cols, col_w) = fetch_grid_columns(ids.len(), ui.available_width());
+                    let per_col = ids.len().div_ceil(cols);
                     ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = 28.0;
+                        ui.spacing_mut().item_spacing.x = FETCH_GRID_GAP_X;
                         for ci in 0..cols {
                             ui.vertical(|ui| {
-                                ui.set_min_width(150.0);
+                                // 定宽列 + 截断：超长模型名悬停看全名，而不是把列撑宽。
+                                ui.set_width(col_w);
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                                 for id in ids.iter().skip(ci * per_col).take(per_col) {
                                     let mut checked = models.iter().any(|m| m.id.trim() == id);
-                                    if ui.checkbox(&mut checked, id).changed() && checked {
+                                    if ui
+                                        .checkbox(&mut checked, id)
+                                        .on_hover_text(id.as_str())
+                                        .changed()
+                                        && checked
+                                    {
                                         let mut row = ModelRow::new();
                                         row.id = id.clone();
                                         row.name = id.clone();
@@ -4759,7 +4789,36 @@ mod compact_tests {
 
 #[cfg(test)]
 mod model_fetch_tests {
-    use super::{chat_url, parse_models_response, sanitize_network_error, App};
+    use super::{
+        chat_url, fetch_grid_columns, parse_models_response, sanitize_network_error, App,
+        FETCH_GRID_GAP_X,
+    };
+
+    #[test]
+    fn fetch_grid_columns_never_exceed_available_width() {
+        // 总宽 = 列数 * 列宽 + 间距 * (列数 - 1)，任何宽度下都不得超过可用宽度。
+        let total = |(cols, col_w): (usize, f32)| {
+            cols as f32 * col_w + FETCH_GRID_GAP_X * (cols - 1) as f32
+        };
+        // 宽窗口：取满 5 列并把宽度均分（5 * 217.6 + 4 * 28 = 1200）。
+        let wide = fetch_grid_columns(50, 1200.0);
+        assert_eq!(wide.0, 5);
+        assert!((wide.1 - 217.6).abs() < 0.01);
+        assert!(total(wide) <= 1200.5);
+        // 中等宽度：列数随可用宽度下降，仍恰好铺满。
+        let mid = fetch_grid_columns(50, 400.0);
+        assert_eq!(mid.0, 2);
+        assert!(total(mid) <= 400.5);
+        // 极窄窗口：退化为单列，宽度不超过可用宽度。
+        let narrow = fetch_grid_columns(50, 120.0);
+        assert_eq!(narrow.0, 1);
+        assert!(narrow.1 <= 120.0);
+        // 模型很少时不空出多余列。
+        assert_eq!(fetch_grid_columns(3, 1200.0).0, 3);
+        // 空列表（防御性）不 panic，也不返回 0 列。
+        assert_eq!(fetch_grid_columns(0, 300.0).0, 1);
+    }
+
     #[test]
     fn parse_openai_style_models() {
         let text = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4o-mini","object":"model"}]}"#;
