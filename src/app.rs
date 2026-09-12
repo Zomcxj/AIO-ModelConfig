@@ -895,6 +895,296 @@ impl eframe::App for App {
     }
 }
 
+/// provider / model 表单的字段可见性与方言标签（opencode / pi / omp / DSH 共用）。
+#[derive(Clone, Copy)]
+struct ProviderFormFlags {
+    show_oc: bool,
+    show_omp: bool,
+    show_dsh: bool,
+    show_provider_base_url: bool,
+    show_provider_timeout: bool,
+    show_model_name: bool,
+    show_model_context: bool,
+    show_model_output: bool,
+    show_model_input: bool,
+    show_model_variants: bool,
+    show_model_reasoning: bool,
+    show_model_tool_call: bool,
+    show_model_store: bool,
+    base_label: &'static str,
+    api_key_label: &'static str,
+    context_label: &'static str,
+    output_label: &'static str,
+    input_label: &'static str,
+}
+
+impl ProviderFormFlags {
+    fn new(app: &App) -> Self {
+        let show_oc = app.current_page == ConfigFormat::Opencode;
+        let show_dsh = app.current_page == ConfigFormat::DeepSeekHarness;
+        Self {
+            show_oc,
+            show_omp: app.current_page == ConfigFormat::OhMyPi,
+            show_dsh,
+            show_provider_base_url: app.page_has_provider_field("base_url"),
+            // opencode 的 options.timeout 始终显示（文件未写该字段时默认 180000ms）
+            show_provider_timeout: show_oc || app.page_has_provider_field("timeout"),
+            show_model_name: app.page_has_model_field("name"),
+            show_model_context: app.page_has_model_field("context"),
+            show_model_output: app.page_has_model_field("output"),
+            show_model_input: app.page_has_model_field("input"),
+            show_model_variants: app.page_has_model_field("variants"),
+            show_model_reasoning: app.page_has_model_field("reasoning"),
+            show_model_tool_call: app.page_has_model_field("tool_call"),
+            show_model_store: app.page_has_model_field("store"),
+            base_label: if show_oc {
+                "options.baseURL"
+            } else if show_dsh {
+                "baseURL"
+            } else {
+                "baseUrl"
+            },
+            api_key_label: if show_oc {
+                "options.apiKey"
+            } else if show_dsh {
+                "apiKeyEnv"
+            } else {
+                "apiKey"
+            },
+            context_label: if show_oc {
+                "limit.context"
+            } else {
+                "contextWindow"
+            },
+            output_label: if show_oc { "limit.output" } else { "maxTokens" },
+            input_label: if show_oc { "modalities.input" } else { "input" },
+        }
+    }
+}
+
+/// npm 包下拉（opencode 专用）；`id_salt` 区分同一页面内的多个表单实例。
+fn provider_npm_combo(
+    ui: &mut egui::Ui,
+    p: &mut ProviderRow,
+    id_salt: &str,
+    empty_has_label: bool,
+) {
+    const NPM_OPTIONS: [&str; 5] = [
+        "",
+        "@ai-sdk/openai",
+        "@ai-sdk/anthropic",
+        "@ai-sdk/google",
+        "@ai-sdk/openai-compatible",
+    ];
+    field_label(ui, 120.0, "npm");
+    let current = p.npm.clone();
+    let mut selected = NPM_OPTIONS.iter().position(|n| *n == current.as_str());
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(if current.is_empty() {
+            "选择 npm 包..."
+        } else {
+            &current
+        })
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            for (i, npm) in NPM_OPTIONS.iter().enumerate() {
+                let label = if npm.is_empty() && empty_has_label {
+                    "(空)"
+                } else {
+                    *npm
+                };
+                if ui.selectable_label(selected == Some(i), label).clicked() {
+                    selected = Some(i);
+                }
+            }
+        });
+    if let Some(i) = selected {
+        p.npm = NPM_OPTIONS[i].to_string();
+    }
+}
+
+/// api / npm 下拉里的「(空)」标签：表示未指定协议。
+const EMPTY_API_LABEL: &str = "(空)";
+
+/// api 下拉：omp 官方 9 值 / pi KnownApi 10 值；首项「(空)」与 opencode 页 npm 的空选项同义。
+fn provider_api_combo(ui: &mut egui::Ui, p: &mut ProviderRow, show_omp: bool, id_salt: &str) {
+    const OMP_APIS: [&str; 9] = [
+        "openai-completions",
+        "openai-responses",
+        "openai-codex-responses",
+        "azure-openai-responses",
+        "anthropic-messages",
+        "bedrock-converse-stream",
+        "google-generative-ai",
+        "google-gemini-cli",
+        "google-vertex",
+    ];
+    const PI_APIS: [&str; 10] = [
+        "openai-completions",
+        "mistral-conversations",
+        "openai-responses",
+        "azure-openai-responses",
+        "openai-codex-responses",
+        "anthropic-messages",
+        "bedrock-converse-stream",
+        "google-generative-ai",
+        "google-vertex",
+        "pi-messages",
+    ];
+    let options: &[&str] = if show_omp { &OMP_APIS } else { &PI_APIS };
+    // 「(空)」= 未指定协议。四页共用同一份数据，故以 npm / pi_api / raw.api
+    // 是否都为空判定，显示值统一走 effective_api()，与写盘、延迟测试同口径。
+    let explicit = p.has_explicit_api();
+    let current = p.effective_api();
+    field_label(ui, 120.0, "api");
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(if explicit {
+            current.as_str()
+        } else {
+            EMPTY_API_LABEL
+        })
+        .width(180.0)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(!explicit, EMPTY_API_LABEL)
+                .on_hover_text("不指定协议：写盘时按兼容层 openai-completions 处理")
+                .clicked()
+            {
+                p.clear_api();
+            }
+            for &api in options {
+                if ui
+                    .selectable_label(explicit && current == api, api)
+                    .clicked()
+                {
+                    p.pi_api = api.to_string();
+                    p.npm = convert::api_to_npm(api);
+                }
+            }
+        });
+}
+
+/// 思考档位多选：按钮展开、勾选写回逗号分隔文本。
+/// `normalize` 为 true 时按规范档位顺序写回，避免重新勾选后被追加到末尾。
+fn variant_selector(
+    ui: &mut egui::Ui,
+    variants: &mut String,
+    names: &[&'static str],
+    open_key: String,
+    open_set: &mut HashSet<String>,
+    normalize: bool,
+) {
+    let current = variants.clone();
+    let mut selected: Vec<String> = current
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let display = if selected.is_empty() {
+        "选择...".to_string()
+    } else {
+        current.clone()
+    };
+    let is_open = open_set.contains(&open_key);
+    if ui.button(display).clicked() {
+        if is_open {
+            open_set.remove(&open_key);
+        } else {
+            open_set.insert(open_key.clone());
+        }
+    }
+    if !is_open {
+        return;
+    }
+    for name in names {
+        let mut checked = selected.iter().any(|s| s == name);
+        if ui.checkbox(&mut checked, *name).changed() {
+            if checked {
+                if !selected.iter().any(|s| s == name) {
+                    selected.push((*name).to_string());
+                }
+            } else {
+                selected.retain(|s| s != name);
+            }
+            *variants = if normalize {
+                crate::model::ordered_variants(selected.iter().map(String::as_str)).join(", ")
+            } else {
+                selected.join(", ")
+            };
+        }
+    }
+}
+
+/// 模型获取结果的勾选面板：勾选后把其中未配置的模型追加到 `models`。
+fn model_fetch_popup<H: std::hash::Hash>(
+    ui: &mut egui::Ui,
+    state: Option<&ModelFetchState>,
+    models: &mut Vec<ModelRow>,
+    current_page: ConfigFormat,
+    id_salt: H,
+) {
+    let Some(state) = state else {
+        ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
+        return;
+    };
+    if state.rx.is_some() {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(16.0));
+            ui.label(egui::RichText::new("正在获取模型…").weak());
+        });
+        return;
+    }
+    let Some(result) = &state.result else {
+        return;
+    };
+    match result {
+        Ok(models_remote) if models_remote.is_empty() => {
+            ui.label(egui::RichText::new("接口未返回任何模型").weak());
+        }
+        Ok(models_remote) => {
+            let ids = models_remote.clone();
+            ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
+            // 最多 5 列横向排列；区域高度固定为 22 行，每列超出部分在区域内垂直滚动查看。
+            // 注意：ScrollArea 内不能用 ui.columns —— columns 会把内容裁到当前可用高度，
+            // 导致内容不进入滚动区、无法滚动。改为横向排布 + 纵向子列。
+            let cols = ids.len().clamp(1, 5);
+            let per_col = ids.len().div_ceil(cols);
+            let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+            egui::ScrollArea::vertical()
+                .id_salt(id_salt)
+                .max_height(row_h * 22.5)
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 28.0;
+                        for ci in 0..cols {
+                            ui.vertical(|ui| {
+                                ui.set_min_width(150.0);
+                                for id in ids.iter().skip(ci * per_col).take(per_col) {
+                                    let mut checked = models.iter().any(|m| m.id.trim() == id);
+                                    if ui.checkbox(&mut checked, id).changed() && checked {
+                                        let mut row = ModelRow::new();
+                                        row.id = id.clone();
+                                        row.name = id.clone();
+                                        row.source_format = Some(current_page);
+                                        models.push(row);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+        }
+        Err(err) => {
+            ui.label(
+                egui::RichText::new(format!("获取失败：{}", err))
+                    .color(egui::Color32::from_rgb(220, 90, 90)),
+            );
+        }
+    }
+}
+
 impl App {
     /// 解析各保存目标的可用性与实际路径（避免在渲染循环中频繁拉起 wsl 进程）。
     fn refresh_targets(&mut self) {
@@ -1814,15 +2104,17 @@ impl App {
             ),
             ConfigFormat::Pi => (
                 "thinkingLevelMap",
-                &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+                &[
+                    "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ],
             ),
             ConfigFormat::OhMyPi => (
                 "thinking.efforts",
-                &["minimal", "low", "medium", "high", "xhigh", "max"],
+                &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
             ),
             ConfigFormat::DeepSeekHarness => (
                 "reasoningEfforts",
-                &["minimal", "low", "medium", "high", "xhigh", "max"],
+                &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
             ),
         }
     }
@@ -2072,44 +2364,28 @@ impl App {
             .map(|(_, p)| p.key.trim().to_string())
             .collect();
         let (variants_label, variant_names) = self.dialect_variants();
-        let show_oc = self.current_page == ConfigFormat::Opencode;
-        let show_omp = self.current_page == ConfigFormat::OhMyPi;
-        let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
-        let show_provider_base_url = self.page_has_provider_field("base_url");
-        // opencode 的 options.timeout 始终显示：文件未写该字段时默认 180000ms
-        let show_provider_timeout = show_oc || self.page_has_provider_field("timeout");
-        let show_dsh_retry = self.current_page == ConfigFormat::DeepSeekHarness;
-        let show_model_name = self.page_has_model_field("name");
-        let show_model_context = self.page_has_model_field("context");
-        let show_model_output = self.page_has_model_field("output");
-        let show_model_input = self.page_has_model_field("input");
-        let show_model_variants = self.page_has_model_field("variants");
-        let show_model_reasoning = self.page_has_model_field("reasoning");
-        let show_model_tool_call = self.page_has_model_field("tool_call");
-        let show_model_store = self.page_has_model_field("store");
+        let ProviderFormFlags {
+            show_oc,
+            show_omp,
+            show_dsh,
+            show_provider_base_url,
+            show_provider_timeout,
+            show_model_name,
+            show_model_context,
+            show_model_output,
+            show_model_input,
+            show_model_variants,
+            show_model_reasoning,
+            show_model_tool_call,
+            show_model_store,
+            base_label,
+            api_key_label,
+            context_label,
+            output_label,
+            input_label,
+            ..
+        } = ProviderFormFlags::new(self);
         let p = &mut self.providers[idx];
-        let base_label = if show_oc {
-            "options.baseURL"
-        } else if show_dsh {
-            "baseURL"
-        } else {
-            "baseUrl"
-        };
-        let api_key_label = if show_oc {
-            "options.apiKey"
-        } else if show_dsh {
-            "apiKeyEnv"
-        } else {
-            "apiKey"
-        };
-        let timeout_label = "options.timeout";
-        let context_label = if show_oc {
-            "limit.context"
-        } else {
-            "contextWindow"
-        };
-        let output_label = if show_oc { "limit.output" } else { "maxTokens" };
-        let input_label = if show_oc { "modalities.input" } else { "input" };
         ui.horizontal_wrapped(|ui| {
             field_label(ui, 120.0, "key");
             let key_resp = ui.add(egui::TextEdit::singleline(&mut p.key).desired_width(120.0));
@@ -2122,89 +2398,19 @@ impl App {
                 );
             }
             if show_oc {
-                field_label(ui, 120.0, "npm");
-                let npm_options = [
-                    "",
-                    "@ai-sdk/openai",
-                    "@ai-sdk/anthropic",
-                    "@ai-sdk/google",
-                    "@ai-sdk/openai-compatible",
-                ];
-                let current_npm = p.npm.clone();
-                let mut selected_npm = npm_options.iter().position(|n| *n == current_npm.as_str());
-                egui::ComboBox::from_id_salt(format!("provider_npm_{}", p.key))
-                    .selected_text(if current_npm.is_empty() {
-                        "选择 npm 包..."
-                    } else {
-                        &current_npm
-                    })
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for (i, npm) in npm_options.iter().enumerate() {
-                            let is_selected = selected_npm == Some(i);
-                            let label = if npm.is_empty() { "(空)" } else { *npm };
-                            if ui.selectable_label(is_selected, label).clicked() {
-                                selected_npm = Some(i);
-                            }
-                        }
-                    });
-                if let Some(idx) = selected_npm {
-                    p.npm = npm_options[idx].to_string();
-                }
+                let salt = format!("provider_npm_{}", p.key);
+                provider_npm_combo(ui, p, &salt, true);
             }
             if !show_oc {
-                field_label(ui, 120.0, "api");
-                // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
-                let api_options: &[&str] = if show_omp {
-                    &[
-                        "openai-completions",
-                        "openai-responses",
-                        "openai-codex-responses",
-                        "azure-openai-responses",
-                        "anthropic-messages",
-                        "bedrock-converse-stream",
-                        "google-generative-ai",
-                        "google-gemini-cli",
-                        "google-vertex",
-                    ]
-                } else {
-                    &[
-                        "openai-completions",
-                        "mistral-conversations",
-                        "openai-responses",
-                        "azure-openai-responses",
-                        "openai-codex-responses",
-                        "anthropic-messages",
-                        "bedrock-converse-stream",
-                        "google-generative-ai",
-                        "google-vertex",
-                        "pi-messages",
-                    ]
-                };
-                let current_api = if p.pi_api.is_empty() {
-                    convert::npm_to_api(&p.npm)
-                } else {
-                    p.pi_api.clone()
-                };
-                egui::ComboBox::from_id_salt(format!("provider_api_{}", p.key))
-                    .selected_text(&current_api)
-                    .width(180.0)
-                    .show_ui(ui, |ui| {
-                        for &api in api_options {
-                            let is_selected = current_api == api;
-                            if ui.selectable_label(is_selected, api).clicked() {
-                                p.pi_api = api.to_string();
-                                p.npm = convert::api_to_npm(api);
-                            }
-                        }
-                    });
+                let salt = format!("provider_api_{}", p.key);
+                provider_api_combo(ui, p, show_omp, &salt);
             }
             // timeout / timeoutMs 与 npm/api 同排（第一行）。
             if show_oc && show_provider_timeout {
-                field_label(ui, 120.0, timeout_label);
+                field_label(ui, 120.0, "options.timeout");
                 numeric_text_edit(ui, &mut p.timeout, 70.0, "180000");
             }
-            if show_dsh_retry {
+            if show_dsh {
                 field_label(ui, 120.0, "timeoutMs");
                 numeric_text_edit(ui, &mut p.dsh_timeout_ms, 70.0, "180000");
             }
@@ -2220,7 +2426,7 @@ impl App {
                 };
                 ui.checkbox(&mut p.requires_reasoning_content, requires_label);
             }
-            if show_dsh_retry {
+            if show_dsh {
                 field_label(ui, 120.0, "retryPolicy.mode");
                 ui.add(egui::TextEdit::singleline(&mut p.dsh_retry_mode).desired_width(100.0));
                 field_label(ui, 120.0, "maxRetries");
@@ -2311,77 +2517,15 @@ impl App {
             self.model_fetch_open.remove(&p.key);
         }
         if self.model_fetch_open.contains(&p.key) {
+            let fetch_key = p.key.clone();
             card_frame(ui, false, 0, |ui| {
-                if let Some(state) = self.model_fetch.get(&p.key) {
-                    if state.rx.is_some() {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().size(16.0));
-                            ui.label(egui::RichText::new("正在获取模型…").weak());
-                        });
-                    } else if let Some(result) = &state.result {
-                        match result {
-                            Ok(models) if models.is_empty() => {
-                                ui.label(egui::RichText::new("接口未返回任何模型").weak());
-                            }
-                            Ok(models) => {
-                                let ids = models.clone();
-                                ui.label(egui::RichText::new("勾选可新增未配置的模型：").weak());
-                                // 最多 5 列横向排列；区域高度固定为 22 行，
-                                // 每列超出部分在区域内垂直滚动查看。
-                                let cols = ids.len().clamp(1, 5);
-                                let per_col = ids.len().div_ceil(cols);
-                                let row_h =
-                                    ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                                // 注意：ScrollArea 内不能用 ui.columns —— columns 会把
-                                // 内容裁到当前可用高度，导致内容不进入滚动区、无法滚动。
-                                // 改为横向排布 + 纵向子列。
-                                egui::ScrollArea::vertical()
-                                    .id_salt(("model_fetch_scroll", p.key.as_str()))
-                                    .max_height(row_h * 22.5)
-                                    .auto_shrink([false, true])
-                                    .scroll_bar_visibility(
-                                        egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                                    )
-                                    .show(ui, |ui| {
-                                        ui.horizontal_top(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 28.0;
-                                            for (ci, _) in (0..cols).enumerate() {
-                                                ui.vertical(|ui| {
-                                                    ui.set_min_width(150.0);
-                                                    for id in
-                                                        ids.iter().skip(ci * per_col).take(per_col)
-                                                    {
-                                                        let mut checked = p
-                                                            .models
-                                                            .iter()
-                                                            .any(|m| m.id.trim() == id);
-                                                        if ui.checkbox(&mut checked, id).changed()
-                                                            && checked
-                                                        {
-                                                            let mut row = ModelRow::new();
-                                                            row.id = id.clone();
-                                                            row.name = id.clone();
-                                                            row.source_format =
-                                                                Some(self.current_page);
-                                                            p.models.push(row);
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    });
-                            }
-                            Err(err) => {
-                                ui.label(
-                                    egui::RichText::new(format!("获取失败：{}", err))
-                                        .color(egui::Color32::from_rgb(220, 90, 90)),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
-                }
+                model_fetch_popup(
+                    ui,
+                    self.model_fetch.get(&fetch_key),
+                    &mut p.models,
+                    self.current_page,
+                    ("model_fetch_scroll", fetch_key.as_str()),
+                );
             });
         }
         let mut rm: Option<usize> = None;
@@ -2495,49 +2639,15 @@ impl App {
                     if show_model_variants {
                         field_label(ui, 120.0, variants_label);
                     }
-                    let current_variants = p.models[j].variants.clone();
-                    let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        current_variants
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    };
-                    let display = if selected_variants.is_empty() {
-                        "选择..."
-                    } else {
-                        &current_variants
-                    };
                     let variant_key = format!("variant_open_{}_{}", p.key, j);
-                    let is_open = self.variant_open.contains(&variant_key);
-                    if ui.button(display).clicked() {
-                        if is_open {
-                            self.variant_open.remove(&variant_key);
-                        } else {
-                            self.variant_open.insert(variant_key.clone());
-                        }
-                    }
-                    if is_open {
-                        for vn in variant_names {
-                            let mut checked = selected_variants.contains(&vn.to_string());
-                            if ui.checkbox(&mut checked, *vn).changed() {
-                                if checked {
-                                    if !selected_variants.contains(&vn.to_string()) {
-                                        selected_variants.push(vn.to_string());
-                                    }
-                                } else {
-                                    selected_variants.retain(|s| s != vn);
-                                }
-                                // 重新勾选也回到规范档位顺序，避免追加到末尾。
-                                p.models[j].variants = crate::model::ordered_variants(
-                                    selected_variants.iter().map(String::as_str),
-                                )
-                                .join(", ");
-                            }
-                        }
-                    }
+                    variant_selector(
+                        ui,
+                        &mut p.models[j].variants,
+                        variant_names,
+                        variant_key,
+                        &mut self.variant_open,
+                        true,
+                    );
                 });
             });
             if let Some(src) = &self.model_drag_src {
@@ -2628,45 +2738,15 @@ impl App {
                     );
                 }
                 field_label(ui, 120.0, variants_label);
-                let current_variants = p.new_model.variants.clone();
-                let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    current_variants
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                };
-                let display = if selected_variants.is_empty() {
-                    "选择..."
-                } else {
-                    &current_variants
-                };
                 let variant_key = format!("new_model_variant_{}", p.key);
-                let is_open = self.variant_open.contains(&variant_key);
-                if ui.button(display).clicked() {
-                    if is_open {
-                        self.variant_open.remove(&variant_key);
-                    } else {
-                        self.variant_open.insert(variant_key.clone());
-                    }
-                }
-                if is_open {
-                    for vn in variant_names {
-                        let mut checked = selected_variants.contains(&vn.to_string());
-                        if ui.checkbox(&mut checked, *vn).changed() {
-                            if checked {
-                                if !selected_variants.contains(&vn.to_string()) {
-                                    selected_variants.push(vn.to_string());
-                                }
-                            } else {
-                                selected_variants.retain(|s| s != vn);
-                            }
-                            p.new_model.variants = selected_variants.join(", ");
-                        }
-                    }
-                }
+                variant_selector(
+                    ui,
+                    &mut p.new_model.variants,
+                    variant_names,
+                    variant_key,
+                    &mut self.variant_open,
+                    false,
+                );
             });
             ui.horizontal(|ui| {
                 ui.add_space(60.0);
@@ -2685,32 +2765,18 @@ impl App {
     }
 
     fn ui_new_provider_form(&mut self, ui: &mut egui::Ui) {
-        let show_oc = self.current_page == ConfigFormat::Opencode;
-        let show_omp = self.current_page == ConfigFormat::OhMyPi;
-        let show_dsh = self.current_page == ConfigFormat::DeepSeekHarness;
-        let base_label = if show_oc {
-            "options.baseURL"
-        } else if show_dsh {
-            "baseURL"
-        } else {
-            "baseUrl"
-        };
-        let api_key_label = if show_oc {
-            "options.apiKey"
-        } else if show_dsh {
-            "apiKeyEnv"
-        } else {
-            "apiKey"
-        };
-        let timeout_label = "options.timeout";
-        let context_label = if show_oc {
-            "limit.context"
-        } else {
-            "contextWindow"
-        };
-        let output_label = if show_oc { "limit.output" } else { "maxTokens" };
-        let input_label = if show_oc { "modalities.input" } else { "input" };
         let (variants_label, variant_names) = self.dialect_variants();
+        let ProviderFormFlags {
+            show_oc,
+            show_omp,
+            show_dsh,
+            base_label,
+            api_key_label,
+            context_label,
+            output_label,
+            input_label,
+            ..
+        } = ProviderFormFlags::new(self);
         ui.group(|ui| {
             ui.horizontal_wrapped(|ui| {
                 field_label(ui, 120.0, "key");
@@ -2720,86 +2786,16 @@ impl App {
                         .desired_width(120.0),
                 );
                 if show_oc {
-                    field_label(ui, 120.0, "npm");
-                    let npm_options = [
-                        "",
-                        "@ai-sdk/openai",
-                        "@ai-sdk/anthropic",
-                        "@ai-sdk/google",
-                        "@ai-sdk/openai-compatible",
-                    ];
-                    let current_npm = self.new_provider.npm.clone();
-                    let mut selected_npm =
-                        npm_options.iter().position(|n| *n == current_npm.as_str());
-                    egui::ComboBox::from_id_salt("new_provider_npm")
-                        .selected_text(if current_npm.is_empty() {
-                            "选择 npm 包..."
-                        } else {
-                            &current_npm
-                        })
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            for (i, npm) in npm_options.iter().enumerate() {
-                                let is_selected = selected_npm == Some(i);
-                                if ui.selectable_label(is_selected, *npm).clicked() {
-                                    selected_npm = Some(i);
-                                }
-                            }
-                        });
-                    if let Some(idx) = selected_npm {
-                        self.new_provider.npm = npm_options[idx].to_string();
-                    }
+                    let p = &mut self.new_provider;
+                    provider_npm_combo(ui, p, "new_provider_npm", false);
                 }
                 if !show_oc {
-                    field_label(ui, 120.0, "api");
-                    // api 枚举按方言：omp 官方 9 值 / pi KnownApi 10 值
-                    let api_options: &[&str] = if show_omp {
-                        &[
-                            "openai-completions",
-                            "openai-responses",
-                            "openai-codex-responses",
-                            "azure-openai-responses",
-                            "anthropic-messages",
-                            "bedrock-converse-stream",
-                            "google-generative-ai",
-                            "google-gemini-cli",
-                            "google-vertex",
-                        ]
-                    } else {
-                        &[
-                            "openai-completions",
-                            "mistral-conversations",
-                            "openai-responses",
-                            "azure-openai-responses",
-                            "openai-codex-responses",
-                            "anthropic-messages",
-                            "bedrock-converse-stream",
-                            "google-generative-ai",
-                            "google-vertex",
-                            "pi-messages",
-                        ]
-                    };
-                    let current_api = if self.new_provider.pi_api.is_empty() {
-                        convert::npm_to_api(&self.new_provider.npm)
-                    } else {
-                        self.new_provider.pi_api.clone()
-                    };
-                    egui::ComboBox::from_id_salt("new_provider_api")
-                        .selected_text(&current_api)
-                        .width(180.0)
-                        .show_ui(ui, |ui| {
-                            for &api in api_options {
-                                let is_selected = current_api == api;
-                                if ui.selectable_label(is_selected, api).clicked() {
-                                    self.new_provider.pi_api = api.to_string();
-                                    self.new_provider.npm = convert::api_to_npm(api);
-                                }
-                            }
-                        });
+                    let p = &mut self.new_provider;
+                    provider_api_combo(ui, p, show_omp, "new_provider_api");
                 }
                 // timeout 与 npm/api 同排（第一行）。
                 if show_oc {
-                    field_label(ui, 120.0, timeout_label);
+                    field_label(ui, 120.0, "options.timeout");
                     numeric_text_edit(ui, &mut self.new_provider.timeout, 70.0, "180000");
                 }
                 // pi / omp 的 compat 与 api 同排显示（紧跟 api 之后）。
@@ -2913,80 +2909,13 @@ impl App {
             }
             if self.model_fetch_open.contains(NEW_PROVIDER_FETCH_KEY) {
                 card_frame(ui, false, 0, |ui| {
-                    if let Some(state) = self.model_fetch.get(NEW_PROVIDER_FETCH_KEY) {
-                        if state.rx.is_some() {
-                            ui.horizontal(|ui| {
-                                ui.add(egui::Spinner::new().size(16.0));
-                                ui.label(egui::RichText::new("正在获取模型…").weak());
-                            });
-                        } else if let Some(result) = &state.result {
-                            match result {
-                                Ok(models) if models.is_empty() => {
-                                    ui.label(egui::RichText::new("接口未返回任何模型").weak());
-                                }
-                                Ok(models) => {
-                                    let ids = models.clone();
-                                    ui.label(
-                                        egui::RichText::new("勾选可新增未配置的模型：").weak(),
-                                    );
-                                    // 与 provider 表单一致：最多 5 列、高度固定 22 行、内部滚动。
-                                    // （ScrollArea 内不用 ui.columns，避免内容被裁出滚动区。）
-                                    let cols = ids.len().clamp(1, 5);
-                                    let per_col = ids.len().div_ceil(cols);
-                                    let row_h =
-                                        ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("new_provider_fetch_scroll")
-                                        .max_height(row_h * 22.5)
-                                        .auto_shrink([false, true])
-                                        .scroll_bar_visibility(
-                                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                                        )
-                                        .show(ui, |ui| {
-                                            ui.horizontal_top(|ui| {
-                                                ui.spacing_mut().item_spacing.x = 28.0;
-                                                for (ci, _) in (0..cols).enumerate() {
-                                                    ui.vertical(|ui| {
-                                                        ui.set_min_width(150.0);
-                                                        for id in ids
-                                                            .iter()
-                                                            .skip(ci * per_col)
-                                                            .take(per_col)
-                                                        {
-                                                            let mut checked = self
-                                                                .new_provider
-                                                                .models
-                                                                .iter()
-                                                                .any(|m| m.id.trim() == id);
-                                                            if ui
-                                                                .checkbox(&mut checked, id)
-                                                                .changed()
-                                                                && checked
-                                                            {
-                                                                let mut row = ModelRow::new();
-                                                                row.id = id.clone();
-                                                                row.name = id.clone();
-                                                                row.source_format =
-                                                                    Some(self.current_page);
-                                                                self.new_provider.models.push(row);
-                                                            }
-                                                        }
-                                                    });
-                                                }
-                                            });
-                                        });
-                                }
-                                Err(err) => {
-                                    ui.label(
-                                        egui::RichText::new(format!("获取失败：{}", err))
-                                            .color(egui::Color32::from_rgb(220, 90, 90)),
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        ui.label(egui::RichText::new("尚未获取，请先点击「获取模型」").weak());
-                    }
+                    model_fetch_popup(
+                        ui,
+                        self.model_fetch.get(NEW_PROVIDER_FETCH_KEY),
+                        &mut self.new_provider.models,
+                        self.current_page,
+                        "new_provider_fetch_scroll",
+                    );
                 });
             }
             let mut rm_new: Option<usize> = None;
@@ -3119,45 +3048,14 @@ impl App {
                         );
                     }
                     field_label(ui, 120.0, variants_label);
-                    let current_variants = self.new_provider.new_model.variants.clone();
-                    let mut selected_variants: Vec<String> = if current_variants.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        current_variants
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    };
-                    let display = if selected_variants.is_empty() {
-                        "选择..."
-                    } else {
-                        &current_variants
-                    };
-                    let popup_key = "new_provider_new_model_variant".to_string();
-                    let is_open = self.variant_open.contains(&popup_key);
-                    if ui.button(display).clicked() {
-                        if is_open {
-                            self.variant_open.remove(&popup_key);
-                        } else {
-                            self.variant_open.insert(popup_key.clone());
-                        }
-                    }
-                    if is_open {
-                        for vn in variant_names {
-                            let mut checked = selected_variants.contains(&vn.to_string());
-                            if ui.checkbox(&mut checked, *vn).changed() {
-                                if checked {
-                                    if !selected_variants.contains(&vn.to_string()) {
-                                        selected_variants.push(vn.to_string());
-                                    }
-                                } else {
-                                    selected_variants.retain(|s| s != vn);
-                                }
-                                self.new_provider.new_model.variants = selected_variants.join(", ");
-                            }
-                        }
-                    }
+                    variant_selector(
+                        ui,
+                        &mut self.new_provider.new_model.variants,
+                        variant_names,
+                        "new_provider_new_model_variant".to_string(),
+                        &mut self.variant_open,
+                        false,
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.add_space(60.0);
