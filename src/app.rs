@@ -1738,20 +1738,19 @@ impl App {
             if let Some(rx) = &state.provider_rx {
                 match rx.try_recv() {
                     Ok(result) => {
-                        let msg = match &result {
-                            Ok(ms) => format!("provider 延迟测试完成：{} ms", ms),
-                            Err(err) => format!("provider 延迟测试失败：{}", err),
-                        };
-                        notices.push(msg);
+                        // 失败原因已就地显示在厂商行（红字 + 悬停详情），
+                        // 不再重复推送到页面底部状态栏。
+                        if let Ok(ms) = &result {
+                            notices.push(format!("provider 延迟测试完成：{} ms", ms));
+                        }
                         state.provider = Some(result);
                         state.provider_rx = None;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         // 测量线程异常退出（panic 等）时收不到结果：
-                        // 终止等待并提示，避免 Spinner/进度永久卡死。
+                        // 终止等待，避免 Spinner/进度永久卡死；不在底部报错。
                         state.provider_rx = None;
-                        notices.push("provider 延迟测试中断（线程异常退出）".to_string());
                     }
                 }
             }
@@ -3689,11 +3688,8 @@ impl App {
         // 查找栏：Enter 下一个 / Shift+Enter 上一个 / Esc 关闭。
         if self.preview_find_active {
             ui.horizontal(|ui| {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.preview_find)
-                        .hint_text("查找（Enter 下一个，Shift+Enter 上一个，Esc 关闭）")
-                        .desired_width(150.0),
-                );
+                let resp =
+                    ui.add(egui::TextEdit::singleline(&mut self.preview_find).desired_width(150.0));
                 if self.preview_find_focus {
                     resp.request_focus();
                     self.preview_find_focus = false;
@@ -3719,7 +3715,7 @@ impl App {
                 if ui.button("⬇").clicked() {
                     step = 1;
                 }
-                if ui.button("✕").clicked() {
+                if ui.button("×").clicked() {
                     self.preview_find_active = false;
                     self.preview_find.clear();
                     self.preview_find_index = 0;
@@ -3826,18 +3822,25 @@ impl App {
                 if let Some(byte) = find_jump {
                     let bounded = byte.min(self.preview_draft.len());
                     let char_idx = self.preview_draft[..bounded].chars().count();
+                    let ccursor = egui::text::CCursor::new(char_idx);
                     let mut state = output.state.clone();
                     state
                         .cursor
                         .set_char_range(Some(egui::text_selection::CCursorRange::two(
-                            egui::text::CCursor::new(char_idx),
-                            egui::text::CCursor::new(char_idx),
+                            ccursor, ccursor,
                         )));
                     state.store(ui.ctx(), resp.id);
+                    // 主动把命中位置滚入视野：egui 只在文本框内容变化时自动滚动到光标，
+                    // 通过按钮/Enter 跳转时光标是外部设置的，需要自己请求滚动。
+                    let rect = output
+                        .galley
+                        .pos_from_cursor(ccursor)
+                        .translate(output.galley_pos.to_vec2());
+                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
                 }
                 self.preview_focused = resp.has_focus();
                 if let Some(range) = output.cursor_range {
-                    let idx = range.primary.ccursor.index;
+                    let idx = range.primary.index;
                     let line = self
                         .preview_draft
                         .chars()
