@@ -1,3 +1,4 @@
+use model_harbor::backends::oh_my_pi;
 use model_harbor::convert;
 use model_harbor::model::ProviderRow;
 use serde_json::json;
@@ -329,7 +330,7 @@ fn anthropic_url_passthrough_no_v1_added() {
 }
 
 #[test]
-fn anthropic_url_v1_stripped_on_save() {
+fn anthropic_url_v1_stripped_on_load_and_save() {
     let v = json!({
         "baseUrl": "https://api.anthropic.com/v1",
         "apiKey": "sk-ant-test",
@@ -337,7 +338,8 @@ fn anthropic_url_v1_stripped_on_save() {
         "models": []
     });
     let provider = convert::provider_from_pi("anthropic", &v);
-    assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
+    // 读入即归一化：界面显示与落盘都不带 /v1
+    assert_eq!(provider.base_url, "https://api.anthropic.com");
     let output = convert::provider_to_pi(&provider);
     assert_eq!(output["baseUrl"], "https://api.anthropic.com");
 }
@@ -558,7 +560,9 @@ fn opencode_rows_from_pi_raw_build_fresh() {
 }
 
 #[test]
-fn anthropic_proxy_url_v1_preserved() {
+fn anthropic_proxy_url_v1_also_stripped() {
+    // 第三方代理与官方端点同一规则：pi / omp / dsh 的客户端都会自己拼 /v1/messages，
+    // base 里再带 /v1 会请求成 /v1/v1/messages。（opencode 相反，见 saving_messages_* 测试。）
     let v = json!({
         "baseUrl": "https://my-gateway.example/v1",
         "apiKey": "sk-test",
@@ -566,11 +570,9 @@ fn anthropic_proxy_url_v1_preserved() {
         "models": []
     });
     let provider = convert::provider_from_pi("proxy", &v);
+    assert_eq!(provider.base_url, "https://my-gateway.example");
     let output = convert::provider_to_pi(&provider);
-    assert_eq!(
-        output["baseUrl"], "https://my-gateway.example/v1",
-        "proxy URLs must not be rewritten"
-    );
+    assert_eq!(output["baseUrl"], "https://my-gateway.example");
 }
 
 #[test]
@@ -650,4 +652,157 @@ fn pi_variants_written_in_canonical_order() {
         .map(String::as_str)
         .collect();
     assert_eq!(keys, vec!["medium", "xhigh", "max"], "实际 {keys:?}");
+}
+
+#[test]
+fn without_v1_only_strips_the_messages_api() {
+    // messages 协议：去掉末尾 /v1
+    assert_eq!(
+        convert::without_v1_for_messages("anthropic-messages", "https://gw.test/v1"),
+        "https://gw.test"
+    );
+    assert_eq!(
+        convert::without_v1_for_messages("anthropic-messages", "https://gw.test/v1/"),
+        "https://gw.test"
+    );
+    // 更深路径只去掉末尾版本段，前缀保留
+    assert_eq!(
+        convert::without_v1_for_messages("anthropic-messages", "https://gw.test/api/v1"),
+        "https://gw.test/api"
+    );
+    // v10 不是 /v1，不能误伤
+    assert_eq!(
+        convert::without_v1_for_messages("anthropic-messages", "https://gw.test/v10"),
+        "https://gw.test/v10"
+    );
+    // 其他协议保留 /v1（opencode 侧 @ai-sdk/* 客户端需要它）
+    assert_eq!(
+        convert::without_v1_for_messages("openai-completions", "https://gw.test/v1"),
+        "https://gw.test/v1"
+    );
+}
+
+#[test]
+fn pi_and_omp_load_strip_v1_for_messages_api_only() {
+    // omp 的 parse 也走 load_pi_providers，因此这条路径同时覆盖 pi 与 omp。
+    let root = json!({
+        "providers": {
+            "claude_gw": {
+                "baseUrl": "https://gw.test/v1",
+                "apiKey": "sk-test",
+                "api": "anthropic-messages",
+                "models": []
+            },
+            "openai_gw": {
+                "baseUrl": "https://gw.test/v1",
+                "apiKey": "sk-test",
+                "api": "openai-completions",
+                "models": []
+            }
+        }
+    });
+    let rows = convert::load_pi_providers(&root);
+    let claude = rows
+        .iter()
+        .find(|p| p.key == "claude_gw")
+        .expect("claude_gw 应存在");
+    let openai = rows
+        .iter()
+        .find(|p| p.key == "openai_gw")
+        .expect("openai_gw 应存在");
+    // 界面显示的 messages base 不再带 /v1，其他协议不动
+    assert_eq!(claude.base_url, "https://gw.test");
+    assert_eq!(openai.base_url, "https://gw.test/v1");
+}
+
+#[test]
+fn saving_messages_provider_drops_v1_for_pi_and_omp_but_not_opencode() {
+    // 从 opencode 读取：@ai-sdk/anthropic 的 baseURL 含 /v1（对它才是对的）
+    let oc = ProviderRow::from(
+        "claude_gw",
+        &json!({
+            "npm": "@ai-sdk/anthropic",
+            "options": {"baseURL": "https://gw.test/v1", "apiKey": "sk-test"},
+            "models": {}
+        }),
+    );
+    assert_eq!(oc.base_url, "https://gw.test/v1");
+    // 写回 opencode：保留 /v1
+    assert_eq!(oc.to_value()["options"]["baseURL"], "https://gw.test/v1");
+    // 写进 pi / omp：去掉 /v1（两家客户端都会自己补 /v1/messages）
+    assert_eq!(convert::provider_to_pi(&oc)["baseUrl"], "https://gw.test");
+    assert_eq!(oh_my_pi::provider_to_omp(&oc)["baseUrl"], "https://gw.test");
+    // 本身就不含 /v1 的自定义路径原样保留
+    let mut custom = oc.clone();
+    custom.base_url = "https://gw.test/anthropic".into();
+    assert_eq!(
+        convert::provider_to_pi(&custom)["baseUrl"],
+        "https://gw.test/anthropic"
+    );
+}
+
+#[test]
+fn opencode_load_and_save_ensure_v1_for_messages_api() {
+    // opencode 的 @ai-sdk/anthropic 只追加 /messages，baseURL 必须带 /v1：
+    // 读入补齐（界面显示就带 /v1），写出也保证带 /v1。
+    let bare = ProviderRow::from(
+        "claude_gw",
+        &json!({
+            "npm": "@ai-sdk/anthropic",
+            "options": {"baseURL": "https://gw.test", "apiKey": "sk-test"},
+            "models": {}
+        }),
+    );
+    assert_eq!(bare.base_url, "https://gw.test/v1");
+    assert_eq!(bare.to_value()["options"]["baseURL"], "https://gw.test/v1");
+    // 已带 /v1（含尾斜杠）不重复追加，也顺手去掉尾斜杠
+    let with_v1 = ProviderRow::from(
+        "claude_gw",
+        &json!({
+            "npm": "@ai-sdk/anthropic",
+            "options": {"baseURL": "https://gw.test/v1/", "apiKey": "sk-test"},
+            "models": {}
+        }),
+    );
+    assert_eq!(with_v1.base_url, "https://gw.test/v1");
+    assert_eq!(
+        with_v1.to_value()["options"]["baseURL"],
+        "https://gw.test/v1"
+    );
+    // 其他协议不动：openai 兼容层的 baseURL 原样保留
+    let compat = ProviderRow::from(
+        "openai_gw",
+        &json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://gw.test", "apiKey": "sk-test"},
+            "models": {}
+        }),
+    );
+    assert_eq!(compat.base_url, "https://gw.test");
+    assert_eq!(compat.to_value()["options"]["baseURL"], "https://gw.test");
+}
+
+#[test]
+fn cross_format_messages_provider_gains_v1_when_written_to_opencode() {
+    // pi 侧读入已去掉 /v1；跨格式写进 opencode 时要补回 /v1，否则 opencode 会请求 {host}/messages
+    let v = json!({
+        "baseUrl": "https://gw.test/v1",
+        "apiKey": "sk-test",
+        "api": "anthropic-messages",
+        "models": []
+    });
+    let pi_row = convert::provider_from_pi("claude_gw", &v);
+    assert_eq!(pi_row.base_url, "https://gw.test");
+    let oc = pi_row.to_value();
+    assert_eq!(oc["npm"], "@ai-sdk/anthropic");
+    assert_eq!(oc["options"]["baseURL"], "https://gw.test/v1");
+    // 其他协议跨写 opencode 不补 /v1
+    let v2 = json!({
+        "baseUrl": "https://gw.test",
+        "apiKey": "sk-test",
+        "api": "openai-completions",
+        "models": []
+    });
+    let compat = convert::provider_from_pi("openai_gw", &v2);
+    assert_eq!(compat.to_value()["options"]["baseURL"], "https://gw.test");
 }

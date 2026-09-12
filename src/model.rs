@@ -538,7 +538,7 @@ impl ProviderRow {
                     "" | "@ai-sdk/openai" | "@ai-sdk/openai-compatible"
                 )
             });
-        Self {
+        let row = Self {
             key: key.to_string(),
             description: str_at(v, "description").to_string(),
             npm: str_at(v, "npm").to_string(),
@@ -580,7 +580,11 @@ impl ProviderRow {
             source_format: Some(ConfigFormat::Opencode),
             raw: v.clone(),
             pi_api: String::new(),
-        }
+        };
+        // opencode 的 anthropic-messages 必须带 /v1：读入即补齐，界面显示与落盘一致。
+        let api = row.effective_api();
+        let base_url = crate::convert::with_v1_for_messages(&api, &row.base_url);
+        Self { base_url, ..row }
     }
 
     /// 生效的 api（线上协议）。UI 显示、写盘、延迟测试共用同一套优先级，避免三处口径不一致：
@@ -686,7 +690,11 @@ impl ProviderRow {
                 .cloned()
                 .unwrap_or_default();
             if base_changed {
-                set_str(&mut options, "baseURL", &self.base_url);
+                // opencode 的 anthropic-messages 必须带 /v1：跨格式写入时源值可能不带（pi / omp / dsh
+                // 读入会去掉 /v1），此处统一补齐；同格式且未改动时 base_changed 为 false，不会产生多余 diff。
+                let api = self.effective_api();
+                let base_url = crate::convert::with_v1_for_messages(&api, &self.base_url);
+                set_str(&mut options, "baseURL", &base_url);
             }
             if key_changed {
                 set_str(&mut options, "apiKey", &self.api_key);

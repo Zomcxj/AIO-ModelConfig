@@ -181,18 +181,6 @@ fn dsh_set_reasoning_efforts(m: &ModelRow, obj: &mut Map<String, Value>) {
     obj.insert("reasoningEfforts".into(), Value::Object(efforts));
 }
 
-fn dsh_base_url(api: &str, url: &str) -> String {
-    if api != "anthropic-messages" {
-        return url.to_string();
-    }
-    let trimmed = url.trim_end_matches('/');
-    if let Some(stripped) = trimmed.strip_suffix("/v1") {
-        stripped.trim_end_matches('/').to_string()
-    } else {
-        url.to_string()
-    }
-}
-
 fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> ProviderRow {
     let api = v.get("api").and_then(Value::as_str).unwrap_or_default();
     let models = v
@@ -209,7 +197,7 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         key: key.to_string(),
         description: String::new(),
         npm: convert::api_to_npm(api),
-        base_url: dsh_base_url(
+        base_url: convert::without_v1_for_messages(
             api,
             v.get("baseURL").and_then(Value::as_str).unwrap_or_default(),
         ),
@@ -486,10 +474,9 @@ fn provider_to_dsh(p: &ProviderRow) -> Value {
     if p.base_url.is_empty() {
         obj.remove("baseURL");
     } else {
-        obj.insert(
-            "baseURL".into(),
-            Value::String(dsh_base_url(&dsh_api_for(p), &p.base_url)),
-        );
+        // 与 pi / omp 共用同一套归一化：messages 协议的 base 不带 /v1。
+        let base_url = convert::without_v1_for_messages(&dsh_api_for(p), &p.base_url);
+        obj.insert("baseURL".into(), Value::String(base_url));
     }
     if env.is_empty() {
         // DSH 原生 provider 未修改 apiKeyEnv 时保留原始引用名，防止
@@ -676,30 +663,5 @@ impl Backend for DeepSeekHarnessBackend {
     }
     fn render(&self, root: &Value, _compact: bool) -> Result<String, String> {
         render_dsh_yaml(root)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dsh_base_url;
-
-    #[test]
-    fn dsh_base_url_strips_v1_only_for_messages_api() {
-        assert_eq!(
-            dsh_base_url("anthropic-messages", "https://example.test/v1"),
-            "https://example.test"
-        );
-        assert_eq!(
-            dsh_base_url("anthropic-messages", "https://example.test/v1/"),
-            "https://example.test"
-        );
-        assert_eq!(
-            dsh_base_url("openai-completions", "https://example.test/v1"),
-            "https://example.test/v1"
-        );
-        assert_eq!(
-            dsh_base_url("anthropic-messages", "https://example.test/v10"),
-            "https://example.test/v10"
-        );
     }
 }

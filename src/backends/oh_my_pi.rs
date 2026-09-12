@@ -159,12 +159,8 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
     let api = p.effective_api();
 
     if !p.base_url.is_empty() {
-        let save_url =
-            if api == "anthropic-messages" && convert::is_official_anthropic_url(&p.base_url) {
-                p.base_url.trim_end_matches("/v1").to_string()
-            } else {
-                p.base_url.clone()
-            };
+        // 与 pi / dsh 同一套归一化：messages 协议的 base 不带 /v1（客户端自行补 /v1/messages）。
+        let save_url = convert::without_v1_for_messages(&api, &p.base_url);
         obj.insert("baseUrl".into(), Value::String(save_url));
     } else {
         obj.remove("baseUrl");

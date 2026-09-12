@@ -54,6 +54,9 @@ cargo build --release
 | `pi-messages` | `POST {base}/messages` | `Authorization: Bearer` |
 | `google-gemini-cli` / `bedrock-converse-stream` | 不支持 | 需专有签名 / 私有网关 |
 
+- `anthropic-messages` 的 `{base}` **不含** `/v1`：pi / oh-my-pi / DSH 的客户端会自己把 `/v1/messages`
+  拼到 base 后面；探测对仍带 `/v1` 的旧值也做归一，不会请求成 `/v1/v1/messages`
+
 - **厂商连通性**：Providers 标题行右侧「连通性测试」按钮，一键测试当前页面全部厂商，耗时显示在各厂商卡片名字右侧（失败显示错误码，悬停看完整错误）；卡片收起时依然可见
 - **模型延迟**：每个 provider 的 Models 标题右侧「模型延迟」按钮，并发测试该 provider 的全部模型（每批 8 个），结果显示在模型卡片头部，并实时显示测试进度
 - 超时判定 10 秒；耗时着色：<5 秒绿色、5~10 秒黄色、>10 秒红色；测试中显示乱码动画
@@ -220,7 +223,10 @@ llm-pi-ai:
 
 ## 注意事项
 
-- `baseURL` 仅在 `api = anthropic-messages` 时去掉末尾 `/v1`，其他 api 保留 `/v1`
+- `baseURL` 末尾 `/v1` 的归一化按目标 agent 的客户端行为决定，**读入与写出都做**：
+  pi / oh-my-pi / DSH 的 `anthropic-messages` **去掉**末尾 `/v1`（这三家客户端都自己拼 `/v1/messages`，
+  base 里再带 `/v1` 会请求成 `/v1/v1/messages`）；opencode 的 `@ai-sdk/anthropic` 相反，baseURL
+  **必须带** `/v1`（客户端只追加 `/messages`），读入时缺了就补上、写出时也保证带上；其他 api 一律不动
 - provider / model 只保存各自支持的字段，方言字段不会互相泄漏
 - oh-my-pi 的 `apiKey` 为「环境变量名或字面量」语义；推理档位保存为官方 `thinking` 块
 - 保存 YAML 时文件注释不会保留，输出为标准块风格

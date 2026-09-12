@@ -25,10 +25,38 @@ pub(crate) fn is_dsh_shaped_provider(raw: &Value) -> bool {
     raw.get("apiKeyEnv").is_some() || raw.get("baseURL").is_some()
 }
 
-/// 仅对 Anthropic 官方端点做 /v1 归一化；自定义代理 URL 原样保留。
-pub(crate) fn is_official_anthropic_url(url: &str) -> bool {
-    let u = url.trim_end_matches('/');
-    u == "https://api.anthropic.com/v1" || u == "https://api.anthropic.com"
+/// `anthropic-messages` 协议的 base URL 归一化：**保证末尾带 `/v1`**（opencode 侧读入与写出共用）。
+///
+/// opencode 的 `@ai-sdk/anthropic` 客户端只往 baseURL 追加 `/messages`，所以 baseURL 必须
+/// 包含 `/v1`（官方默认值就是 `https://api.anthropic.com/v1`）。pi / oh-my-pi / DSH 相反，
+/// 见 [`without_v1_for_messages`]。
+pub fn with_v1_for_messages(api: &str, url: &str) -> String {
+    if api != "anthropic-messages" || url.trim().is_empty() {
+        return url.to_string();
+    }
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{}/v1", trimmed)
+    }
+}
+
+/// `anthropic-messages` 协议的 base URL 归一化：去掉末尾 `/v1`（读入与写出共用）。
+///
+/// pi / omp / dsh 都把这个值原样交给 Anthropic SDK 风格的客户端，由客户端自行拼接
+/// `/v1/messages`（字符串拼接），所以 base 里再带 `/v1` 会请求成 `/v1/v1/messages`。
+/// opencode（`@ai-sdk/anthropic`）则相反：它的 baseURL 必须包含 `/v1`（客户端只追加
+/// `/messages`），因此**不做**归一化。
+pub fn without_v1_for_messages(api: &str, url: &str) -> String {
+    if api != "anthropic-messages" {
+        return url.to_string();
+    }
+    let trimmed = url.trim_end_matches('/');
+    match trimmed.strip_suffix("/v1") {
+        Some(rest) => rest.trim_end_matches('/').to_string(),
+        None => url.to_string(),
+    }
 }
 
 /// opencode 的 npm 包 → pi / omp 的 api（线上协议）：
@@ -224,7 +252,9 @@ pub fn model_to_pi(m: &ModelRow) -> Value {
 pub fn provider_from_pi(key: &str, v: &Value) -> ProviderRow {
     let api = str_at(v, "api");
     let npm = api_to_npm(api);
-    let base_url = str_at(v, "baseUrl").to_string();
+    // pi / omp 的 messages 协议由客户端补 /v1/messages，配置里不带 /v1：
+    // 读入时就归一化，界面显示的也是不带 /v1 的值，再写回目标文件保持一致。
+    let base_url = without_v1_for_messages(api, str_at(v, "baseUrl"));
     let models = v
         .get("models")
         .and_then(|x| x.as_array())
@@ -340,11 +370,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
     }
     let api = p.effective_api();
     if !p.base_url.is_empty() {
-        let save_url = if api == "anthropic-messages" && is_official_anthropic_url(&p.base_url) {
-            p.base_url.trim_end_matches("/v1").to_string()
-        } else {
-            p.base_url.clone()
-        };
+        let save_url = without_v1_for_messages(&api, &p.base_url);
         obj.insert("baseUrl".into(), Value::String(save_url));
     } else {
         obj.remove("baseUrl");
