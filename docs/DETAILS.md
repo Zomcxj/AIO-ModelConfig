@@ -4,7 +4,7 @@
 
 ## 技术栈
 
-Rust（2021 edition）+ [eframe / egui](https://github.com/emilk/egui) 0.31；JSON 使用 serde_json，YAML 使用 serde_yaml_ng，文件对话框使用 rfd，网络请求使用 ureq。
+Rust（2021 edition）+ [eframe / egui](https://github.com/emilk/egui) 0.33；JSON 使用 serde_json，YAML 使用 serde_yaml_ng，文件对话框使用 rfd，网络请求使用 ureq。
 
 ## 构建运行
 
@@ -23,9 +23,9 @@ cargo build --release
 各页表单按自身方言显示字段与枚举，无对应字段不显示占位：
 
 - **opencode 页**：`options.baseURL` / `options.timeout` / `npm` 下拉 / `limit.context` / `modalities` / `variants`（none…ultra）
-- **pi 页**：`baseUrl` / `apiKey` / `api` 下拉（pi KnownApi 10 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinkingLevelMap`（off/minimal…max）
-- **oh-my-pi 页**：`baseUrl` / `apiKey` / `api` 下拉（omp 官方 9 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinking.efforts`（minimal…max）
-- **DeepSeek Harness 页**：`baseURL` / `apiKeyEnv` + 实际密钥 / `api` 下拉 / `timeoutMs` / `retryPolicy.mode` / `retryPolicy.maxRetries` / `models`（`id` / `name` / `contextWindow` / `maxTokens` / `input` / `reasoningEfforts`）
+- **pi 页**：`baseUrl` / `apiKey` / `api` 下拉（pi KnownApi 10 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinkingLevelMap`（off/minimal…ultra）
+- **oh-my-pi 页**：`baseUrl` / `apiKey` / `api` 下拉（omp 官方 9 值）/ `compat` / `contextWindow` / `maxTokens` / `input` / `thinking.efforts`（minimal…ultra）
+- **DeepSeek Harness 页**：`baseURL` / `apiKeyEnv` + 实际密钥 / `api` 下拉 / `timeoutMs` / `retryPolicy.mode` / `retryPolicy.maxRetries` / `models`（`id` / `name` / `contextWindow` / `maxTokens` / `input` / `reasoningEfforts`（minimal…ultra））
 
 协议（`npm` / `api`）四页共用同一份数据，口径统一走 `ProviderRow::effective_api()`：
 `npm` 非空按 npm 包推导 → `api` 非空直接用 → 原文件的 `api` → 都没有则按兼容层 `openai-completions`。
@@ -35,7 +35,8 @@ cargo build --release
 
 每个 provider 卡片与「新增 Provider」弹窗的 Models 标题右侧都有「获取模型」按钮，按 provider 的 api 类型请求模型列表并弹层展示：
 
-- 展示为多列 checkbox 网格，高度固定，超出部分在卡片内滚动；请求中显示进度指示
+- 展示为 checkbox 网格，列数按面板可用宽度自适应（窄窗口不再横向溢出），高度固定，超出部分在卡片内滚动；请求中显示进度指示
+- 模型 id 过长时截断显示，悬停可看完整名称
 - 已配置的模型自动勾选；勾选未配置的模型即新增，取消勾选不会删除已有配置
 - 兼容 `data` / `models` / 裸数组三种响应结构（含 `models/` 前缀清理与去重）
 
@@ -54,8 +55,8 @@ cargo build --release
 | `pi-messages` | `POST {base}/messages` | `Authorization: Bearer` |
 | `google-gemini-cli` / `bedrock-converse-stream` | 不支持 | 需专有签名 / 私有网关 |
 
-- `anthropic-messages` 的 `{base}` **不含** `/v1`：pi / oh-my-pi / DSH 的客户端会自己把 `/v1/messages`
-  拼到 base 后面；探测对仍带 `/v1` 的旧值也做归一，不会请求成 `/v1/v1/messages`
+- `anthropic-messages` 的 `{base}` 两种写法都会被归一：已带 `/v1` 时补 `/messages`，未带时补 `/v1/messages`
+  （pi / oh-my-pi / DSH 的 base 不含 `/v1`，opencode 的 baseURL 必带 `/v1`，见「注意事项」）
 
 - **厂商连通性**：Providers 标题行右侧「连通性测试」按钮，一键测试当前页面全部厂商，耗时显示在各厂商卡片名字右侧（失败显示错误码，悬停看完整错误）；卡片收起时依然可见
 - **模型延迟**：每个 provider 的 Models 标题右侧「模型延迟」按钮，并发测试该 provider 的全部模型（每批 8 个），结果显示在模型卡片头部，并实时显示测试进度
@@ -69,6 +70,8 @@ cargo build --release
 
 - JSON / YAML **语法高亮**（键、字符串、数字、布尔、注释分色）
 - 文本框可直接编辑：改动实时应用到左侧表单；停止输入约 0.8 秒后自动保存
+- 切页 / 重新加载时重置草稿并释放焦点，不会残留上一页的文档
+- 仅在编辑空闲后才按组件状态重建草稿，手改不会被冲掉；「重新生成」按钮显式放弃手改
 - 格式错误时在标题行提示，编辑内容不会被写盘
 - `Ctrl+F` 查找，Enter / Shift+Enter 跳转上下一个命中，Esc 关闭
 - 面板左边缘的分隔条可拖动调整宽度，窗口缩放时按调整后的比例适配
@@ -77,7 +80,8 @@ cargo build --release
 
 - 每页有独立保存按钮与写入路径，默认写 Windows 本地路径
 - 当前文件属于本页格式且已加载时写当前文件；手动改了路径但未加载时写入该路径并保留目标文件其余配置
-- 跨格式写入只更新 `agent` / `provider`（或 `providers`）字段，目标文件其余配置（如 `mcp`、`instructions`）原样保留，不产生空对象污染
+- 跨格式写入只接管 `agent` / `provider`（或 `providers`）容器：容器内的条目与顺序完全来自界面，目标文件里多出来的旧条目不残留；目标文件其余顶层配置（如 `mcp`、`instructions`）原样保留
+- 跨格式写入覆盖已存在的文件前，先把原内容备份为 `<文件>.bak`（内容相同或文件为空时跳过）；备份失败则取消保存，不会静默替换旧配置
 - 勾选「WSL同步」后同时写入 WSL 侧对应路径；未在 WSL 中安装对应 agent 时禁用勾选
 
 ## 缺省值与字段映射
