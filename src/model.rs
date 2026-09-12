@@ -244,14 +244,32 @@ impl ModelRow {
         let convert_dialect = self
             .source_format
             .is_some_and(|format| format != ConfigFormat::Opencode);
+        let raw_empty = raw_object_is_empty(&self.raw);
         let mut m = if convert_dialect {
             Map::new()
         } else {
             self.raw.as_object().cloned().unwrap_or_default()
         };
 
+        self.apply_identity(&mut m, convert_dialect);
+        self.apply_store(&mut m, convert_dialect, raw_empty);
+        self.apply_limits(&mut m, convert_dialect);
+        self.apply_modalities(&mut m, convert_dialect);
+        self.apply_variants(&mut m, convert_dialect);
+
+        // 新建模型 / 跨格式写入时按 opencode 惯例键顺序输出（name、modalities、
+        // reasoning、tool_call、limit、options、variants），与配置文件保持一致；
+        // 同格式已有 raw 的模型保留原有键顺序，避免无意义的整文件重排。
+        if convert_dialect || raw_empty {
+            m = canonical_model_order(m);
+        }
+        Value::Object(m)
+    }
+
+    /// 名称与 opencode 专属开关（reasoning / tool_call）。
+    fn apply_identity(&self, m: &mut Map<String, Value>, convert_dialect: bool) {
         if convert_dialect {
-            set_str(&mut m, "name", &self.name);
+            set_str(m, "name", &self.name);
             // reasoning/tool_call 是 opencode 专属控件。跨格式来源不继承默认值，
             // 但用户在 opencode 页明确勾选后仍可写入。
             if self.reasoning {
@@ -260,71 +278,77 @@ impl ModelRow {
             if self.tool_call {
                 m.insert("tool_call".into(), true.into());
             }
-        } else {
-            set_changed_str(&mut m, &self.raw, "name", &self.name);
-            if changed_bool(&self.raw, "reasoning", self.reasoning) {
-                m.insert("reasoning".into(), self.reasoning.into());
-            }
-            if changed_bool(&self.raw, "tool_call", self.tool_call) {
-                m.insert("tool_call".into(), self.tool_call.into());
-            }
+            return;
         }
+        set_changed_str(m, &self.raw, "name", &self.name);
+        if changed_bool(&self.raw, "reasoning", self.reasoning) {
+            m.insert("reasoning".into(), self.reasoning.into());
+        }
+        if changed_bool(&self.raw, "tool_call", self.tool_call) {
+            m.insert("tool_call".into(), self.tool_call.into());
+        }
+    }
 
+    /// `options.store`：新建模型（raw 为空）与既有配置一致写出 false，
+    /// 已有模型仍只在改动时写入，保持最小 diff。
+    fn apply_store(&self, m: &mut Map<String, Value>, convert_dialect: bool, raw_empty: bool) {
         let raw_store = self
             .raw
             .get("options")
             .and_then(|o| o.get("store"))
             .and_then(Value::as_bool);
-        // 新建模型（raw 为空）：与既有配置一致写出 options.store=false，
-        // 否则新增模型会缺这个字段（已有模型仍只在改动时写入，保持最小 diff）。
-        let new_model = match self.raw.as_object() {
-            Some(obj) => obj.is_empty(),
-            None => true,
-        };
-        if convert_dialect || raw_store != Some(self.store) {
-            if self.store {
-                let mut options = m
-                    .get("options")
-                    .and_then(|o| o.as_object())
-                    .cloned()
-                    .unwrap_or_default();
-                options.insert("store".into(), true.into());
-                m.insert("options".into(), Value::Object(options));
-            } else if new_model && !convert_dialect {
-                let mut options = Map::new();
-                options.insert("store".into(), Value::Bool(false));
-                m.insert("options".into(), Value::Object(options));
-            } else if let Some(options) = m.get_mut("options").and_then(Value::as_object_mut) {
-                options.remove("store");
-                if options.is_empty() {
-                    m.remove("options");
-                }
+        if !convert_dialect && raw_store == Some(self.store) {
+            return;
+        }
+        if self.store {
+            let mut options = m
+                .get("options")
+                .and_then(|o| o.as_object())
+                .cloned()
+                .unwrap_or_default();
+            options.insert("store".into(), true.into());
+            m.insert("options".into(), Value::Object(options));
+        } else if raw_empty && !convert_dialect {
+            let mut options = Map::new();
+            options.insert("store".into(), Value::Bool(false));
+            m.insert("options".into(), Value::Object(options));
+        } else if let Some(options) = m.get_mut("options").and_then(Value::as_object_mut) {
+            options.remove("store");
+            if options.is_empty() {
+                m.remove("options");
             }
         }
+    }
 
+    /// `limit.context` / `limit.output`。
+    fn apply_limits(&self, m: &mut Map<String, Value>, convert_dialect: bool) {
         let context_changed =
             convert_dialect || changed_nested_num(&self.raw, &["limit", "context"], &self.context);
         let output_changed =
             convert_dialect || changed_nested_num(&self.raw, &["limit", "output"], &self.output);
-        if context_changed || output_changed {
-            let mut limit = m
-                .get("limit")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            if context_changed {
-                set_num_opt(&mut limit, "context", &self.context);
-            }
-            if output_changed {
-                set_num_opt(&mut limit, "output", &self.output);
-            }
-            if limit.is_empty() {
-                m.remove("limit");
-            } else {
-                m.insert("limit".into(), Value::Object(limit));
-            }
+        if !context_changed && !output_changed {
+            return;
         }
+        let mut limit = m
+            .get("limit")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if context_changed {
+            set_num_opt(&mut limit, "context", &self.context);
+        }
+        if output_changed {
+            set_num_opt(&mut limit, "output", &self.output);
+        }
+        if limit.is_empty() {
+            m.remove("limit");
+        } else {
+            m.insert("limit".into(), Value::Object(limit));
+        }
+    }
 
+    /// `modalities.input` / `modalities.output`（逗号分隔列表）。
+    fn apply_modalities(&self, m: &mut Map<String, Value>, convert_dialect: bool) {
         let input_changed = convert_dialect
             || changed_list(&self.raw, &["modalities", "input"], &self.modalities_input);
         let output_changed = convert_dialect
@@ -333,84 +357,90 @@ impl ModelRow {
                 &["modalities", "output"],
                 &self.modalities_output,
             );
-        if input_changed || output_changed {
-            let mut modalities = m
-                .get("modalities")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            if input_changed {
-                let values: Vec<Value> = self
-                    .modalities_input
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|value| Value::String(value.to_string()))
-                    .collect();
-                if values.is_empty() {
-                    modalities.remove("input");
-                } else {
-                    modalities.insert("input".into(), Value::Array(values));
-                }
-            }
-            if output_changed {
-                let values: Vec<Value> = self
-                    .modalities_output
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|value| Value::String(value.to_string()))
-                    .collect();
-                if values.is_empty() {
-                    modalities.remove("output");
-                } else {
-                    modalities.insert("output".into(), Value::Array(values));
-                }
-            }
-            if modalities.is_empty() {
-                m.remove("modalities");
-            } else {
-                m.insert("modalities".into(), Value::Object(modalities));
-            }
+        if !input_changed && !output_changed {
+            return;
         }
+        let mut modalities = m
+            .get("modalities")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        set_list(
+            &mut modalities,
+            "input",
+            input_changed,
+            &self.modalities_input,
+        );
+        set_list(
+            &mut modalities,
+            "output",
+            output_changed,
+            &self.modalities_output,
+        );
+        if modalities.is_empty() {
+            m.remove("modalities");
+        } else {
+            m.insert("modalities".into(), Value::Object(modalities));
+        }
+    }
 
-        let raw_variants = self.raw.get("variants").and_then(Value::as_object);
-        let raw_variant_names = raw_variants
+    /// `variants`：按规范顺序写出，并保留 raw 中各档位的原有内容。
+    fn apply_variants(&self, m: &mut Map<String, Value>, convert_dialect: bool) {
+        let raw_names = self
+            .raw
+            .get("variants")
+            .and_then(Value::as_object)
             .map(|v| v.keys().cloned().collect::<Vec<_>>().join(", "))
             .unwrap_or_default();
-        if convert_dialect || self.variants != raw_variant_names {
-            if self.variants.trim().is_empty() {
-                m.remove("variants");
-            } else {
-                let raw_variants = m
-                    .get("variants")
-                    .and_then(Value::as_object)
+        if !convert_dialect && self.variants == raw_names {
+            return;
+        }
+        if self.variants.trim().is_empty() {
+            m.remove("variants");
+            return;
+        }
+        let raw_variants = m
+            .get("variants")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let variants_map: Map<String, Value> = ordered_variants_text(&self.variants)
+            .into_iter()
+            .map(|name| {
+                let value = raw_variants
+                    .get(&name)
                     .cloned()
-                    .unwrap_or_default();
-                let variants_map: Map<String, Value> = ordered_variants_text(&self.variants)
-                    .into_iter()
-                    .map(|name| {
-                        let value = raw_variants
-                            .get(&name)
-                            .cloned()
-                            .unwrap_or_else(|| Value::Object(Map::new()));
-                        (name, value)
-                    })
-                    .collect();
-                m.insert("variants".into(), Value::Object(variants_map));
-            }
-        }
-        // 新建模型 / 跨格式写入时按 opencode 惯例键顺序输出（name、modalities、
-        // reasoning、tool_call、limit、options、variants），与配置文件保持一致；
-        // 同格式已有 raw 的模型保留原有键顺序，避免无意义的整文件重排。
-        let raw_empty = match self.raw.as_object() {
-            Some(obj) => obj.is_empty(),
-            None => true,
-        };
-        if convert_dialect || raw_empty {
-            m = canonical_model_order(m);
-        }
-        Value::Object(m)
+                    .unwrap_or_else(|| Value::Object(Map::new()));
+                (name, value)
+            })
+            .collect();
+        m.insert("variants".into(), Value::Object(variants_map));
+    }
+}
+
+/// 逗号分隔的模态列表写入：改动过才写，空串删除该键。
+fn set_list(target: &mut Map<String, Value>, key: &str, changed: bool, text: &str) {
+    if !changed {
+        return;
+    }
+    let values: Vec<Value> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|value| Value::String(value.to_string()))
+        .collect();
+    if values.is_empty() {
+        target.remove(key);
+    } else {
+        target.insert(key.into(), Value::Array(values));
+    }
+}
+
+/// raw 是否为空对象（视为新建条目）。
+fn raw_object_is_empty(raw: &Value) -> bool {
+    match raw.as_object() {
+        Some(obj) => obj.is_empty(),
+        None => true,
     }
 }
 

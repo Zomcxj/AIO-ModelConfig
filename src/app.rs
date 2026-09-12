@@ -148,86 +148,108 @@ fn json_tokens(text: &str) -> Vec<(usize, usize, egui::Color32)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        match b[i] {
-            b'"' => {
-                let start = i;
-                i += 1;
-                while i < b.len() {
-                    match b[i] {
-                        b'\\' => i += 2,
-                        b'"' => {
-                            i += 1;
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-                let end = i.min(b.len());
-                // 后面紧跟冒号则为对象键（VSCode Dark+ 用不同颜色）。
-                let mut j = end;
-                while j < b.len() && (b[j] as char).is_ascii_whitespace() {
-                    j += 1;
-                }
-                let color = if j < b.len() && b[j] == b':' {
-                    SYN_KEY
-                } else {
-                    SYN_STRING
-                };
-                out.push((start, end, color));
-            }
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                let start = i;
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-                out.push((start, i, SYN_COMMENT));
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                let start = i;
-                i += 2;
-                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
-                    i += 1;
-                }
-                i = (i + 2).min(b.len());
-                out.push((start, i, SYN_COMMENT));
-            }
-            c if c == b'-' || c.is_ascii_digit() => {
-                let start = i;
-                if b[i] == b'-' {
-                    i += 1;
-                }
-                while i < b.len()
-                    && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
-                {
-                    i += 1;
-                }
-                out.push((start, i, SYN_NUMBER));
-            }
-            c if c.is_ascii_alphabetic() => {
-                let rest = &text[i..];
-                let mut hit = None;
-                for lit in ["true", "false", "null"] {
-                    if rest.starts_with(lit) {
-                        hit = Some(lit.len());
-                        break;
-                    }
-                }
-                match hit {
-                    Some(len) => {
-                        out.push((i, i + len, SYN_LITERAL));
-                        i += len;
-                    }
-                    None => i += 1,
-                }
-            }
+        i = match b[i] {
+            b'"' => json_string_at(b, i, &mut out),
+            b'/' if b.get(i + 1) == Some(&b'/') => json_line_comment_at(b, i, &mut out),
+            b'/' if b.get(i + 1) == Some(&b'*') => json_block_comment_at(b, i, &mut out),
+            c if c == b'-' || c.is_ascii_digit() => json_number_at(b, i, &mut out),
+            c if c.is_ascii_alphabetic() => json_literal_at(text, i, &mut out),
             b'{' | b'}' | b'[' | b']' | b',' | b':' => {
                 out.push((i, i + 1, SYN_PUNCT));
+                i + 1
+            }
+            _ => i + 1,
+        };
+    }
+    out
+}
+
+/// 扫描一个 JSON 字符串（含两侧引号）并着色，返回结束位置。
+fn json_string_at(b: &[u8], start: usize, out: &mut Vec<(usize, usize, egui::Color32)>) -> usize {
+    let mut i = start + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => {
                 i += 1;
+                break;
             }
             _ => i += 1,
         }
     }
-    out
+    let end = i.min(b.len());
+    // 后面紧跟冒号则为对象键（VSCode Dark+ 用不同颜色）。
+    let color = if json_followed_by_colon(b, end) {
+        SYN_KEY
+    } else {
+        SYN_STRING
+    };
+    out.push((start, end, color));
+    end
+}
+
+/// 跳过空白后是否为 `:`：用于判断字符串是对象键还是普通值。
+fn json_followed_by_colon(b: &[u8], from: usize) -> bool {
+    let mut j = from;
+    while j < b.len() && (b[j] as char).is_ascii_whitespace() {
+        j += 1;
+    }
+    b.get(j) == Some(&b':')
+}
+
+/// `//` 行注释：着色到行尾（不含换行）。
+fn json_line_comment_at(
+    b: &[u8],
+    start: usize,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) -> usize {
+    let mut i = start;
+    while i < b.len() && b[i] != b'\n' {
+        i += 1;
+    }
+    out.push((start, i, SYN_COMMENT));
+    i
+}
+
+/// `/* ... */` 块注释：未闭合时着色到文本末尾。
+fn json_block_comment_at(
+    b: &[u8],
+    start: usize,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) -> usize {
+    let mut i = start + 2;
+    while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+        i += 1;
+    }
+    let end = (i + 2).min(b.len());
+    out.push((start, end, SYN_COMMENT));
+    end
+}
+
+/// 数字（含前导 `-` 与指数部分）。
+fn json_number_at(b: &[u8], start: usize, out: &mut Vec<(usize, usize, egui::Color32)>) -> usize {
+    let mut i = start;
+    if b[i] == b'-' {
+        i += 1;
+    }
+    while i < b.len() && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+    {
+        i += 1;
+    }
+    out.push((start, i, SYN_NUMBER));
+    i
+}
+
+/// 字面量 `true` / `false` / `null`；未命中则前进一个字节。
+fn json_literal_at(text: &str, i: usize, out: &mut Vec<(usize, usize, egui::Color32)>) -> usize {
+    let rest = &text[i..];
+    for lit in ["true", "false", "null"] {
+        if rest.starts_with(lit) {
+            out.push((i, i + lit.len(), SYN_LITERAL));
+            return i + lit.len();
+        }
+    }
+    i + 1
 }
 
 /// YAML：注释、`---` 文档标记、列表项、键、引号/裸标量、数字、布尔。
@@ -236,106 +258,171 @@ fn yaml_tokens(text: &str) -> Vec<(usize, usize, egui::Color32)> {
     let mut out = Vec::new();
     let mut line_start = 0;
     while line_start <= b.len() {
-        let line_end = b[line_start..]
-            .iter()
-            .position(|&c| c == b'\n')
-            .map(|p| line_start + p)
-            .unwrap_or(b.len());
-        let mut i = line_start;
-        while i < line_end && (b[i] == b' ' || b[i] == b'\t') {
-            i += 1;
-        }
-        if line_end.saturating_sub(i) >= 3 && (b[i..i + 3] == *b"---" || b[i..i + 3] == *b"...") {
-            out.push((i, i + 3, SYN_PUNCT));
-            i += 3;
-        } else if i < line_end && b[i] != b'#' {
-            // 列表项 "- "
-            if b[i] == b'-' && (i + 1 >= line_end || b[i + 1] == b' ' || b[i + 1] == b'\t') {
-                out.push((i, i + 1, SYN_PUNCT));
-                i += 1;
-            }
-            // 键：到 ':' 为止（行内 '#' 起为注释）
-            let mut j = i;
-            let mut colon = None;
-            while j < line_end {
-                if b[j] == b'#' && (j == i || b[j - 1] == b' ' || b[j - 1] == b'\t') {
-                    break;
-                }
-                if b[j] == b':' {
-                    colon = Some(j);
-                    break;
-                }
-                j += 1;
-            }
-            if let Some(c) = colon {
-                if c > i {
-                    out.push((i, c, SYN_KEY));
-                }
-                out.push((c, c + 1, SYN_PUNCT));
-                i = c + 1;
-            }
-        }
-        // 值 / 注释扫描到行尾
-        while i < line_end {
-            match b[i] {
-                b' ' | b'\t' => i += 1,
-                b'#' => {
-                    out.push((i, line_end, SYN_COMMENT));
-                    i = line_end;
-                }
-                q @ (b'"' | b'\'') => {
-                    let start = i;
-                    i += 1;
-                    while i < line_end {
-                        if q == b'"' && b[i] == b'\\' {
-                            i += 2;
-                            continue;
-                        }
-                        if b[i] == q {
-                            i += 1;
-                            break;
-                        }
-                        i += 1;
-                    }
-                    out.push((start, i.min(line_end), SYN_STRING));
-                }
-                c if c == b'-' || c.is_ascii_digit() => {
-                    let start = i;
-                    if b[i] == b'-' {
-                        i += 1;
-                    }
-                    while i < line_end
-                        && (b[i].is_ascii_digit()
-                            || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
-                    {
-                        i += 1;
-                    }
-                    out.push((start, i, SYN_NUMBER));
-                }
-                _ => {
-                    let start = i;
-                    while i < line_end {
-                        if b[i] == b'#' && i > line_start && b[i - 1] == b' ' {
-                            break;
-                        }
-                        i += 1;
-                    }
-                    let color = match text[start..i].trim_end() {
-                        "true" | "false" | "null" | "~" | "yes" | "no" | "on" | "off" => {
-                            SYN_LITERAL
-                        }
-                        _ => SYN_STRING,
-                    };
-                    out.push((start, i, color));
-                }
-            }
-        }
+        let line_end = yaml_line_end(b, line_start);
+        let indent_end = yaml_indent_end(b, line_start, line_end);
+        let value_start = yaml_head_token(b, indent_end, line_end, &mut out);
+        yaml_value_tokens(text, b, value_start, line_start, line_end, &mut out);
         if line_end >= b.len() {
             break;
         }
         line_start = line_end + 1;
     }
     out
+}
+
+/// 当前行换行符位置（无换行则为文本末尾）。
+fn yaml_line_end(b: &[u8], line_start: usize) -> usize {
+    b[line_start..]
+        .iter()
+        .position(|&c| c == b'\n')
+        .map(|p| line_start + p)
+        .unwrap_or(b.len())
+}
+
+/// 跳过行首空格 / 制表符后的位置。
+fn yaml_indent_end(b: &[u8], line_start: usize, line_end: usize) -> usize {
+    let mut i = line_start;
+    while i < line_end && (b[i] == b' ' || b[i] == b'\t') {
+        i += 1;
+    }
+    i
+}
+
+/// 行首标记：`---` / `...` 文档标记、`- ` 列表项、`key:` 键；返回值扫描起点。
+fn yaml_head_token(
+    b: &[u8],
+    i: usize,
+    line_end: usize,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) -> usize {
+    if line_end.saturating_sub(i) >= 3 && (b[i..i + 3] == *b"---" || b[i..i + 3] == *b"...") {
+        out.push((i, i + 3, SYN_PUNCT));
+        return i + 3;
+    }
+    if i >= line_end || b[i] == b'#' {
+        return i;
+    }
+    let mut i = i;
+    // 列表项 "- "
+    if b[i] == b'-' && (i + 1 >= line_end || b[i + 1] == b' ' || b[i + 1] == b'\t') {
+        out.push((i, i + 1, SYN_PUNCT));
+        i += 1;
+    }
+    // 键：到 ':' 为止（行内 '#' 起为注释）
+    if let Some(colon) = yaml_key_colon(b, i, line_end) {
+        if colon > i {
+            out.push((i, colon, SYN_KEY));
+        }
+        out.push((colon, colon + 1, SYN_PUNCT));
+        i = colon + 1;
+    }
+    i
+}
+
+/// 行内第一个键分隔冒号；遇到注释起点则视为无键。
+fn yaml_key_colon(b: &[u8], from: usize, line_end: usize) -> Option<usize> {
+    let mut j = from;
+    while j < line_end {
+        if b[j] == b'#' && (j == from || b[j - 1] == b' ' || b[j - 1] == b'\t') {
+            return None;
+        }
+        if b[j] == b':' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// 行内值部分：空白、注释、引号标量、数字、裸标量。
+fn yaml_value_tokens(
+    text: &str,
+    b: &[u8],
+    mut i: usize,
+    line_start: usize,
+    line_end: usize,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) {
+    while i < line_end {
+        i = match b[i] {
+            b' ' | b'\t' => i + 1,
+            b'#' => {
+                out.push((i, line_end, SYN_COMMENT));
+                line_end
+            }
+            q @ (b'"' | b'\'') => yaml_quoted_at(b, i, line_end, q, out),
+            c if c == b'-' || c.is_ascii_digit() => yaml_number_at(b, i, line_end, out),
+            _ => yaml_plain_scalar(text, b, i, line_start, line_end, out),
+        };
+    }
+}
+
+/// 引号标量：`"` 支持反斜杠转义，`'` 不支持；未闭合时着色到行尾。
+fn yaml_quoted_at(
+    b: &[u8],
+    start: usize,
+    line_end: usize,
+    quote: u8,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) -> usize {
+    let mut i = start + 1;
+    while i < line_end {
+        if quote == b'"' && b[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if b[i] == quote {
+            i += 1;
+            break;
+        }
+        i += 1;
+    }
+    out.push((start, i.min(line_end), SYN_STRING));
+    i
+}
+
+/// 数字（含前导 `-` 与指数部分）。
+fn yaml_number_at(
+    b: &[u8],
+    start: usize,
+    line_end: usize,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) -> usize {
+    let mut i = start;
+    if b[i] == b'-' {
+        i += 1;
+    }
+    while i < line_end
+        && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+    {
+        i += 1;
+    }
+    out.push((start, i, SYN_NUMBER));
+    i
+}
+
+/// 裸标量：布尔 / null / `~` 等着色为字面量，其余为字符串。
+fn yaml_plain_scalar(
+    text: &str,
+    b: &[u8],
+    start: usize,
+    line_start: usize,
+    line_end: usize,
+    out: &mut Vec<(usize, usize, egui::Color32)>,
+) -> usize {
+    let mut i = start;
+    while i < line_end {
+        if b[i] == b'#' && i > line_start && b[i - 1] == b' ' {
+            break;
+        }
+        i += 1;
+    }
+    let color = match text[start..i].trim_end() {
+        "true" | "false" | "null" | "~" | "yes" | "no" | "on" | "off" => SYN_LITERAL,
+        _ => SYN_STRING,
+    };
+    out.push((start, i, color));
+    i
 }
 
 /// 把查找命中的底色叠加到已按语法着色的 LayoutJob 上（按 section 拆分，保留前景色）。

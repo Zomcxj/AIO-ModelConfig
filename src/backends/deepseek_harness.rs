@@ -51,32 +51,77 @@ fn model_from_dsh(v: &Value) -> ModelRow {
 fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
     // DSH 原生往返保留未知字段；跨格式写入使用 DSH 的固定字段顺序，
     // 避免将 opencode/pi 的方言字段泄漏到 DSH。
-    let mut obj = if preserve_raw {
-        m.raw.as_object().cloned().unwrap_or_default()
-    } else {
-        let mut fields = Map::new();
-        fields.insert("id".into(), Value::String(m.id.clone()));
-        if !m.name.trim().is_empty() {
-            fields.insert("name".into(), Value::String(m.name.clone()));
-        }
-        if let Some(v) = crate::util::parse_number_text(&m.context) {
-            fields.insert("contextWindow".into(), v);
-        }
-        if let Some(v) = crate::util::parse_number_text(&m.output) {
-            fields.insert("maxTokens".into(), v);
-        }
-        Map::from_iter(fields)
-    };
+    let mut obj = dsh_model_base(m, preserve_raw);
+
+    dsh_set_id(m, &mut obj, preserve_raw);
+    dsh_set_name(m, &mut obj, preserve_raw);
+    dsh_set_input(m, &mut obj, preserve_raw);
+    dsh_set_number(
+        &mut obj,
+        "contextWindow",
+        &m.context,
+        !preserve_raw || m.context != crate::util::num_at(&m.raw, "contextWindow"),
+    );
+    dsh_set_number(
+        &mut obj,
+        "maxTokens",
+        &m.output,
+        !preserve_raw || m.output != crate::util::num_at(&m.raw, "maxTokens"),
+    );
+    if !preserve_raw || m.variants != m.original_variants {
+        dsh_set_reasoning_efforts(m, &mut obj);
+    }
+
+    Value::Object(order_fields(obj, DSH_MODEL_FIELDS))
+}
+
+/// DSH 模型的固定字段顺序。
+const DSH_MODEL_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "contextWindow",
+    "maxTokens",
+    "input",
+    "reasoningEfforts",
+];
+
+/// 基底对象：原生往返沿用 raw，跨格式写入从 id / name / 数值字段重建。
+fn dsh_model_base(m: &ModelRow, preserve_raw: bool) -> Map<String, Value> {
+    if preserve_raw {
+        return m.raw.as_object().cloned().unwrap_or_default();
+    }
+    let mut fields = Map::new();
+    fields.insert("id".into(), Value::String(m.id.clone()));
+    if !m.name.trim().is_empty() {
+        fields.insert("name".into(), Value::String(m.name.clone()));
+    }
+    if let Some(v) = crate::util::parse_number_text(&m.context) {
+        fields.insert("contextWindow".into(), v);
+    }
+    if let Some(v) = crate::util::parse_number_text(&m.output) {
+        fields.insert("maxTokens".into(), v);
+    }
+    fields
+}
+
+fn dsh_set_id(m: &ModelRow, obj: &mut Map<String, Value>, preserve_raw: bool) {
     if !preserve_raw || m.id != m.raw.get("id").and_then(Value::as_str).unwrap_or("") {
         obj.insert("id".into(), Value::String(m.id.clone()));
     }
-    if !preserve_raw || m.name != m.raw.get("name").and_then(Value::as_str).unwrap_or("") {
-        if m.name.trim().is_empty() {
-            obj.remove("name");
-        } else {
-            obj.insert("name".into(), Value::String(m.name.clone()));
-        }
+}
+
+fn dsh_set_name(m: &ModelRow, obj: &mut Map<String, Value>, preserve_raw: bool) {
+    if preserve_raw && m.name == m.raw.get("name").and_then(Value::as_str).unwrap_or("") {
+        return;
     }
+    if m.name.trim().is_empty() {
+        obj.remove("name");
+    } else {
+        obj.insert("name".into(), Value::String(m.name.clone()));
+    }
+}
+
+fn dsh_set_input(m: &ModelRow, obj: &mut Map<String, Value>, preserve_raw: bool) {
     let input: Vec<Value> = m
         .modalities_input
         .split(',')
@@ -95,72 +140,45 @@ fn model_to_dsh(m: &ModelRow, preserve_raw: bool) -> Value {
             obj.insert("input".into(), Value::Array(input));
         }
     }
-    let context_changed = m.context != crate::util::num_at(&m.raw, "contextWindow");
-    let output_changed = m.output != crate::util::num_at(&m.raw, "maxTokens");
-    if !preserve_raw || context_changed {
-        match crate::util::parse_number_text(&m.context) {
-            Some(v) => {
-                obj.insert("contextWindow".into(), v);
-            }
-            None => {
-                obj.remove("contextWindow");
-            }
+}
+
+/// 数值字段：空串或非法输入删除该键。
+fn dsh_set_number(obj: &mut Map<String, Value>, key: &str, text: &str, changed: bool) {
+    if !changed {
+        return;
+    }
+    match crate::util::parse_number_text(text) {
+        Some(v) => {
+            obj.insert(key.into(), v);
+        }
+        None => {
+            obj.remove(key);
         }
     }
-    if !preserve_raw || output_changed {
-        match crate::util::parse_number_text(&m.output) {
-            Some(v) => {
-                obj.insert("maxTokens".into(), v);
-            }
-            None => {
-                obj.remove("maxTokens");
-            }
-        }
-    }
-    if preserve_raw && m.variants == m.original_variants {
-        return Value::Object(order_fields(
-            obj,
-            &[
-                "id",
-                "name",
-                "contextWindow",
-                "maxTokens",
-                "input",
-                "reasoningEfforts",
-            ],
-        ));
-    }
+}
+
+/// `reasoningEfforts`：按规范档位顺序写出；raw 中已有的映射（含非对称档位）
+/// 按键原样保留。
+fn dsh_set_reasoning_efforts(m: &ModelRow, obj: &mut Map<String, Value>) {
     if m.variants.trim().is_empty() {
         obj.remove("reasoningEfforts");
-    } else {
-        let raw_efforts = m.raw.get("reasoningEfforts").and_then(Value::as_object);
-        let mut efforts = Map::new();
-        // 按规范档位顺序写出；raw 中已有的映射（含非对称档位）按键原样保留。
-        for name in crate::model::ordered_variants_text(&m.variants) {
-            let existing = raw_efforts
-                .and_then(|raw| raw.iter().find(|(_, v)| v.as_str() == Some(name.as_str())));
-            match existing {
-                Some((key, value)) => {
-                    efforts.insert(key.clone(), value.clone());
-                }
-                None => {
-                    efforts.insert(name.clone(), Value::String(name));
-                }
+        return;
+    }
+    let raw_efforts = m.raw.get("reasoningEfforts").and_then(Value::as_object);
+    let mut efforts = Map::new();
+    for name in crate::model::ordered_variants_text(&m.variants) {
+        let existing =
+            raw_efforts.and_then(|raw| raw.iter().find(|(_, v)| v.as_str() == Some(name.as_str())));
+        match existing {
+            Some((key, value)) => {
+                efforts.insert(key.clone(), value.clone());
+            }
+            None => {
+                efforts.insert(name.clone(), Value::String(name));
             }
         }
-        obj.insert("reasoningEfforts".into(), Value::Object(efforts));
     }
-    Value::Object(order_fields(
-        obj,
-        &[
-            "id",
-            "name",
-            "contextWindow",
-            "maxTokens",
-            "input",
-            "reasoningEfforts",
-        ],
-    ))
+    obj.insert("reasoningEfforts".into(), Value::Object(efforts));
 }
 
 fn dsh_base_url(api: &str, url: &str) -> String {
@@ -182,21 +200,11 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         .and_then(Value::as_array)
         .map(|a| a.iter().map(model_from_dsh).collect())
         .unwrap_or_default();
-    let env = v
-        .get("apiKeyEnv")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| credentials::default_env_name(key));
-    // 配置文件没有 timeoutMs 时默认显示 180000ms（保存时未修改则不写回）。
-    let timeout_text = {
-        let t = crate::util::num_at(v, "timeoutMs");
-        if t.is_empty() {
-            "180000".to_string()
-        } else {
-            t
-        }
-    };
+    let env = dsh_api_key_env(key, v);
+    let timeout_text = dsh_timeout_text(v);
+    let retry_mode = dsh_retry_mode(v);
+    let max_retries = dsh_max_retries(v);
+    let secret = credentials::secret_for(credentials_root, &env);
     ProviderRow {
         key: key.to_string(),
         description: String::new(),
@@ -205,38 +213,20 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
             api,
             v.get("baseURL").and_then(Value::as_str).unwrap_or_default(),
         ),
-        api_key: credentials::secret_for(credentials_root, &env),
+        api_key: secret.clone(),
         api_key_env: env.clone(),
         original_api_key_env: env.clone(),
-        api_key_secret: credentials::secret_for(credentials_root, &env),
-        original_api_key_secret: credentials::secret_for(credentials_root, &env),
+        api_key_secret: secret.clone(),
+        original_api_key_secret: secret,
         dsh_timeout_ms: timeout_text.clone(),
-        dsh_retry_mode: v
-            .get("retryPolicy")
-            .and_then(|value| value.get("mode"))
-            .and_then(Value::as_str)
-            .unwrap_or("normal")
-            .to_string(),
-        dsh_max_retries: v
-            .get("retryPolicy")
-            .and_then(|value| value.get("maxRetries"))
-            .map(crate::util::number_text_public)
-            .unwrap_or_default(),
+        dsh_retry_mode: retry_mode.clone(),
+        dsh_max_retries: max_retries.clone(),
         original_dsh_timeout_ms: timeout_text.clone(),
-        original_dsh_retry_mode: v
-            .get("retryPolicy")
-            .and_then(|value| value.get("mode"))
-            .and_then(Value::as_str)
-            .unwrap_or("normal")
-            .to_string(),
-        original_dsh_max_retries: v
-            .get("retryPolicy")
-            .and_then(|value| value.get("maxRetries"))
-            .map(crate::util::number_text_public)
-            .unwrap_or_default(),
+        original_dsh_retry_mode: retry_mode,
+        original_dsh_max_retries: max_retries,
         // 切到 opencode 页时沿用 DSH 的 timeoutMs（缺省 180000）。
         timeout: timeout_text.clone(),
-        original_timeout: timeout_text.clone(),
+        original_timeout: timeout_text,
         // DSH 无 compat 键；api 缺省或 openai-completions（chat/completions）
         // 不支持 developer role，默认不勾选。
         compat: !api.is_empty() && api != "openai-completions",
@@ -249,6 +239,42 @@ fn provider_from_dsh(key: &str, v: &Value, credentials_root: &Value) -> Provider
         raw: v.clone(),
         pi_api: api.to_string(),
     }
+}
+
+/// `apiKeyEnv`：缺失或空白时按 provider key 生成默认环境变量名。
+fn dsh_api_key_env(key: &str, v: &Value) -> String {
+    v.get("apiKeyEnv")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| credentials::default_env_name(key))
+}
+
+/// 配置文件没有 timeoutMs 时默认显示 180000ms（保存时未修改则不写回）。
+fn dsh_timeout_text(v: &Value) -> String {
+    let t = crate::util::num_at(v, "timeoutMs");
+    if t.is_empty() {
+        "180000".to_string()
+    } else {
+        t
+    }
+}
+
+/// `retryPolicy.mode`：配置文件缺失时按 normal 处理。
+fn dsh_retry_mode(v: &Value) -> String {
+    v.get("retryPolicy")
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("normal")
+        .to_string()
+}
+
+/// `retryPolicy.maxRetries`：按原样文本读取，未设置则为空串。
+fn dsh_max_retries(v: &Value) -> String {
+    v.get("retryPolicy")
+        .and_then(|value| value.get("maxRetries"))
+        .map(crate::util::number_text_public)
+        .unwrap_or_default()
 }
 
 fn dsh_api_for(p: &ProviderRow) -> String {
