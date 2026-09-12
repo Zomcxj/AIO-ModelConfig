@@ -108,6 +108,17 @@ pub fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     items.insert(to, item);
 }
 
+/// 把一张卡片的拖拽落点并入本帧的聚合结果。
+///
+/// 语义是「只增不减」：`found` 为 `None` 时必须保留 `acc` 中已有的落点。卡片是逐张渲染的，
+/// 若每张卡片各自写入落点，后面渲染的卡片会把前面命中的落点清成 `None`，被拖到的卡片就拿不到
+/// 落点边框（模型卡片的绿色边框曾因此消失）。
+pub fn merge_drag_target(acc: &mut Option<String>, found: Option<String>) {
+    if acc.is_none() {
+        *acc = found;
+    }
+}
+
 /// 密钥输入框：`show` 为 false 时掩码显示（圆点），内容仍保留。
 /// 显隐切换由工具栏「显示密钥/隐藏密钥」全局按钮控制。
 pub fn secret_text_edit(
@@ -142,5 +153,35 @@ pub fn numeric_text_edit(
     } else {
         ui.add(edit.text_color(egui::Color32::from_rgb(220, 90, 90)))
             .on_hover_text("无效数字：保存时该字段将被忽略")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_drag_target;
+
+    #[test]
+    fn merge_drag_target_keeps_earlier_hit() {
+        let mut acc = None;
+        // 先渲染的卡片未命中：聚合结果保持为空
+        merge_drag_target(&mut acc, None);
+        assert_eq!(acc, None);
+        // 命中落点
+        merge_drag_target(&mut acc, Some("p\u{1f}m".to_string()));
+        assert_eq!(acc.as_deref(), Some("p\u{1f}m"));
+        // 后面还有卡片展开且未命中：不能把已命中的落点清掉
+        merge_drag_target(&mut acc, None);
+        assert_eq!(acc.as_deref(), Some("p\u{1f}m"));
+        // 已命中时后续命中不覆盖：保持首个落点，行为稳定
+        merge_drag_target(&mut acc, Some("other".to_string()));
+        assert_eq!(acc.as_deref(), Some("p\u{1f}m"));
+    }
+
+    #[test]
+    fn merge_drag_target_stays_none_without_hit() {
+        let mut acc = None;
+        merge_drag_target(&mut acc, None);
+        merge_drag_target(&mut acc, None);
+        assert_eq!(acc, None);
     }
 }

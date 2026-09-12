@@ -5,7 +5,8 @@ use crate::format::{ConfigFormat, ConfigPaths};
 use crate::model::{AgentRow, ModelRow, ProviderRow};
 use crate::theme::Theme;
 use crate::ui::{
-    card_frame, card_list, field_label, move_item, numeric_text_edit, secret_text_edit, DragHandle,
+    card_frame, card_list, field_label, merge_drag_target, move_item, numeric_text_edit,
+    secret_text_edit, DragHandle,
 };
 use crate::util::{self, is_wsl_path, parse_number_text, show_file_dialog};
 use eframe::egui;
@@ -2382,9 +2383,19 @@ impl App {
 
             let mut to_remove: Option<usize> = None;
             let mut to_copy: Option<usize> = None;
+            // 拖拽落点必须在**所有卡片渲染完之后**统一聚合再写入 self：
+            // 卡片各自赋值会被后渲染的卡片用 None 覆盖（模型卡片曾因此丢失绿色落点边框）。
             let mut hover_target: Option<String> = None;
+            let mut model_hover_target: Option<String> = None;
             card_list(ui, &matched, 0.0, |ui, idx| {
-                self.render_provider_card(ui, idx, &mut to_remove, &mut to_copy, &mut hover_target);
+                self.render_provider_card(
+                    ui,
+                    idx,
+                    &mut to_remove,
+                    &mut to_copy,
+                    &mut hover_target,
+                    &mut model_hover_target,
+                );
             });
             if let Some(idx) = to_remove {
                 self.providers.remove(idx);
@@ -2400,6 +2411,13 @@ impl App {
                 self.provider_drag_target = hover_target;
             } else {
                 self.provider_drag_target = None;
+            }
+            // 模型拖拽落点：与 provider 同样在外层聚合，保证任意展开顺序下被拖到的
+            // 模型卡片都能拿到绿色边框（见 render_provider_form 里的说明）。
+            if self.model_drag_src.is_some() {
+                self.model_drag_target = model_hover_target;
+            } else {
+                self.model_drag_target = None;
             }
 
             ui.add_space(10.0);
@@ -2514,6 +2532,7 @@ impl App {
         to_remove: &mut Option<usize>,
         to_copy: &mut Option<usize>,
         hover_target: &mut Option<String>,
+        model_hover_target: &mut Option<String>,
     ) {
         let key = self.providers[idx].key.clone();
         let open = self.provider_open.contains(&key);
@@ -2589,7 +2608,7 @@ impl App {
                 });
             });
             if open {
-                self.render_provider_form(ui, idx);
+                self.render_provider_form(ui, idx, model_hover_target);
             }
         });
         if let Some(src_key) = &self.provider_drag_src {
@@ -2599,7 +2618,12 @@ impl App {
         }
     }
 
-    fn render_provider_form(&mut self, ui: &mut egui::Ui, idx: usize) {
+    fn render_provider_form(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        model_hover_target: &mut Option<String>,
+    ) {
         let prev_key = self.providers[idx].key.clone();
         let other_keys: HashSet<String> = self
             .providers
@@ -2774,7 +2798,7 @@ impl App {
             });
         }
         let mut rm: Option<usize> = None;
-        let mut model_hover_target: Option<String> = None;
+        let mut model_hover_here: Option<String> = None;
         let mut model_drag_stopped = false;
         for j in 0..p.models.len() {
             let model_key = format!("{}\u{1f}{}", p.key, p.models[j].id);
@@ -2882,17 +2906,15 @@ impl App {
             if let Some(src) = &self.model_drag_src {
                 if src != &model_key
                     && model_response.contains_pointer()
-                    && model_hover_target.is_none()
+                    && model_hover_here.is_none()
                 {
-                    model_hover_target = Some(model_key.clone());
+                    model_hover_here = Some(model_key.clone());
                 }
             }
         }
-        if self.model_drag_src.is_some() {
-            self.model_drag_target = model_hover_target;
-        } else {
-            self.model_drag_target = None;
-        }
+        // 只登记「本 provider 内被拖到的模型」，跨卡片的聚合交给调用方
+        // （ui_providers_section 在全部卡片渲染完之后统一写入 self.model_drag_target）。
+        merge_drag_target(model_hover_target, model_hover_here);
         if model_drag_stopped {
             if let Some(src) = self.model_drag_src.take() {
                 let target = self.model_drag_target.take();
