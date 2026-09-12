@@ -67,7 +67,10 @@ pub trait Backend: Sync {
 
     /// 构造保存用 root。
     /// - `target_root = None`：当前文件保存，以 `extras` 为基底整体写入 UI 状态；
-    /// - `target_root = Some`：跨格式目标保存，与目标现有内容合并（upsert）。
+    /// - `target_root = Some`：目标文件已存在，与目标现有内容合并（upsert）。
+    ///   调用方在跨格式转换（来源格式 ≠ 目标格式）前会先剔除目标里由界面接管的
+    ///   provider / agent 容器（见 `app::strip_cross_format_containers`），
+    ///   因此这种情况下的合并基底只剩目标文件的其他顶层字段。
     fn serialize_root(
         &self,
         agents: &[AgentRow],

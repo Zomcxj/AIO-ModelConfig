@@ -3512,7 +3512,13 @@ impl App {
         let res = self.save_backend_to(fmt, &path);
         let ok = res.is_ok();
         self.status = match res {
-            Ok(()) => format!("{}: 已保存", fmt.label()),
+            Ok(backup) => {
+                let mut msg = format!("{}: 已保存", fmt.label());
+                if let Some(backup) = backup {
+                    msg.push_str(&format!("（跨格式转换，原文件已备份为 {}）", backup));
+                }
+                msg
+            }
             Err(e) => format!("{}: 保存失败({})", fmt.label(), e),
         };
         if ok {
@@ -3534,7 +3540,7 @@ impl App {
         if self.sync_wsl && ok && !is_wsl_path(&path) {
             match backends::wsl_target(fmt) {
                 Some(wsl_path) => match self.save_backend_to(fmt, &wsl_path) {
-                    Ok(()) => self
+                    Ok(_) => self
                         .status
                         .push_str(&format!("; {}(WSL): 已同步", fmt.label())),
                     Err(e) => {
@@ -3550,16 +3556,21 @@ impl App {
     }
 
     /// 通用保存：按后端构造 root、渲染内容并写入。
-    fn save_backend_to(&mut self, fmt: ConfigFormat, path: &str) -> Result<(), String> {
+    fn save_backend_to(&mut self, fmt: ConfigFormat, path: &str) -> Result<Option<String>, String> {
         let backend = backends::backend(fmt);
-        // 仅“已加载的当前文件”允许整体替换；其余目标（含已修改未加载的路径）一律先读后合并
-        // 同一路径但切换到其他格式页面时，必须按目标格式先读后合并，
-        // 只有来源格式和已加载路径都匹配时才允许整体替换。
+        // 已加载的当前文件整体替换；同格式的其他路径（WSL 同步等）先读后合并；
+        // 跨格式目标（来源格式不同）做「干净转换」：目标文件里由组件状态接管的
+        // provider / agent 容器整体丢弃（条目与顺序都来自界面），其余顶层字段保留。
         let is_current = self.source_format == fmt && path == self.loaded_path;
+        let cross_format = self.source_format != fmt;
         let target_root: Option<Value> = if is_current {
             None
         } else {
-            Some(backend.load_target_root(path))
+            let mut target = backend.load_target_root(path);
+            if cross_format {
+                strip_cross_format_containers(fmt, &mut target);
+            }
+            Some(target)
         };
         let root = backend.serialize_root(
             &self.agents,
@@ -3591,6 +3602,22 @@ impl App {
         } else {
             None
         };
+        // 跨格式转换会整体接管目标文件的 provider/agent：先把原文件滚动备份为 .bak，
+        // 备份失败则取消保存（宁可不让存，也不能把旧配置静默抵掉）。
+        let backup = if cross_format && !is_current {
+            match util::read_config_content(path) {
+                Ok(old) if !old.is_empty() && old != content => {
+                    let backup_path = format!("{}.bak", path);
+                    backends::write_config(&backup_path, &old).map_err(|e| {
+                        format!("跨格式转换前备份失败（{}），已取消保存: {}", backup_path, e)
+                    })?;
+                    Some(backup_path)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         if fmt == ConfigFormat::DeepSeekHarness {
             backend.save_sidecars(path, &self.providers)?;
         }
@@ -3615,7 +3642,7 @@ impl App {
         if is_current && fmt == ConfigFormat::Opencode {
             self.root = root;
         }
-        Ok(())
+        Ok(backup)
     }
 
     /// 当前文件保存时使用的基底 extras（按后端取对应载体）。
@@ -3939,10 +3966,16 @@ impl App {
             PageTarget::Current(p) | PageTarget::Modified(p) | PageTarget::Default(p) => p.clone(),
         };
         let is_current = self.source_format == fmt && path == self.loaded_path;
+        // 与 save_backend_to 同一套语义：跨格式目标做干净转换（provider 容器由界面接管），
+        // 预览显示的内容就是保存将要写出的内容。
         let target_root = if is_current {
             None
         } else {
-            Some(backend.load_target_root(&path))
+            let mut target = backend.load_target_root(&path);
+            if self.source_format != fmt {
+                strip_cross_format_containers(fmt, &mut target);
+            }
+            Some(target)
         };
         let root = backend.serialize_root(
             &self.agents,
@@ -4010,7 +4043,16 @@ impl App {
             return;
         }
         match self.save_backend_to(fmt, &path) {
-            Ok(()) => self.status = format!("{}: 已实时保存", fmt.label()),
+            Ok(backup) => {
+                self.status = match backup {
+                    Some(backup) => format!(
+                        "{}: 已实时保存（跨格式转换，原文件已备份为 {}）",
+                        fmt.label(),
+                        backup
+                    ),
+                    None => format!("{}: 已实时保存", fmt.label()),
+                }
+            }
             Err(e) => self.status = format!("{}: 实时保存失败({})", fmt.label(), e),
         }
     }
@@ -4290,6 +4332,32 @@ fn serialize_object(object: &Map<String, Value>, level: usize, role: CompactRole
 // —— 兼容再导出：实现迁移至 util / backends，保持既有测试路径可用 ——
 pub use crate::backends::opencode::merge_opencode_root;
 pub use crate::util::parse_config_content;
+
+/// 跨格式转换前，从目标 root 中剔除由当前组件状态接管的容器：
+/// provider（opencode 的 provider / pi 系与 DSH 的 providers）与 opencode 的 agent。
+///
+/// 目的：跨格式保存/预览时，provider 条目与顺序完全以界面为准（干净转换），
+/// 同时目标文件的其他顶层字段（如 DSH 的 llm-pi-ai 下其他设置）原样保留。
+/// 同格式目标（WSL 同步等）不走这里，仍用保守合并。
+pub fn strip_cross_format_containers(fmt: ConfigFormat, root: &mut Value) {
+    let Some(obj) = root.as_object_mut() else {
+        return;
+    };
+    match fmt {
+        ConfigFormat::Opencode => {
+            obj.remove("provider");
+            obj.remove("agent");
+        }
+        ConfigFormat::Pi | ConfigFormat::OhMyPi => {
+            obj.remove("providers");
+        }
+        ConfigFormat::DeepSeekHarness => {
+            if let Some(llm) = obj.get_mut("llm-pi-ai").and_then(Value::as_object_mut) {
+                llm.remove("providers");
+            }
+        }
+    }
+}
 
 /// 加载 opencode 配置；读取/解析失败返回 Err。
 pub fn load_opencode_result(

@@ -156,3 +156,112 @@ fn opencode_merge_preserves_target_model_options() {
         "目标独有模型应保留"
     );
 }
+
+// ---------- 跨格式转换：目标文件的 provider/agent 容器由界面接管 ----------
+
+use model_harbor::app::strip_cross_format_containers;
+use model_harbor::backends;
+use model_harbor::format::ConfigFormat;
+use serde_json::{Map, Value};
+
+fn empty_extras() -> Value {
+    Value::Object(Map::new())
+}
+
+fn ui_providers(keys: &[&str]) -> Vec<ProviderRow> {
+    keys.iter()
+        .map(|k| {
+            ProviderRow::from(
+                k,
+                &json!({
+                    "npm": "",
+                    "options": { "baseURL": format!("https://{}.example/v1", k), "apiKey": "k" },
+                    "models": {}
+                }),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn strip_drops_managed_containers_per_format() {
+    // opencode：provider 与 agent 由界面接管，其他顶层字段保留
+    let mut oc = json!({
+        "provider": { "old": {} },
+        "agent": { "writer": {} },
+        "mcp": { "srv": {} }
+    });
+    strip_cross_format_containers(ConfigFormat::Opencode, &mut oc);
+    assert!(oc.get("provider").is_none());
+    assert!(oc.get("agent").is_none());
+    assert!(oc["mcp"]["srv"].is_object());
+
+    // pi / omp：providers 由界面接管，其他顶层字段保留
+    for fmt in [ConfigFormat::Pi, ConfigFormat::OhMyPi] {
+        let mut root = json!({ "providers": { "old": {} }, "defaultModel": "x" });
+        strip_cross_format_containers(fmt, &mut root);
+        assert!(root.get("providers").is_none(), "{:?}", fmt);
+        assert_eq!(root["defaultModel"], "x", "{:?}", fmt);
+    }
+
+    // DSH：只剔除 llm-pi-ai.providers，同级其他设置保留
+    let mut dsh = json!({
+        "llm-pi-ai": { "providers": { "old": {} }, "timeoutMs": 10000 },
+        "other": 1
+    });
+    strip_cross_format_containers(ConfigFormat::DeepSeekHarness, &mut dsh);
+    assert!(dsh["llm-pi-ai"].get("providers").is_none());
+    assert_eq!(dsh["llm-pi-ai"]["timeoutMs"], 10000);
+    assert_eq!(dsh["other"], 1);
+}
+
+#[test]
+fn cross_format_pi_doc_takes_ui_providers_and_order() {
+    // 目标 pi 文件已有 old 厂商 + 其他顶层字段
+    let mut target = json!({
+        "providers": { "old": { "baseUrl": "https://old/v1" } },
+        "defaultProvider": "old"
+    });
+    strip_cross_format_containers(ConfigFormat::Pi, &mut target);
+    let providers = ui_providers(&["zeta", "alpha"]);
+    let doc = backends::backend(ConfigFormat::Pi).serialize_root(
+        &[],
+        &providers,
+        &empty_extras(),
+        Some(&target),
+    );
+    let keys: Vec<String> = doc["providers"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        keys,
+        vec!["zeta", "alpha"],
+        "跨格式转换的 provider 顺序必须来自界面（拖拽排序在预览/保存中可见）"
+    );
+    assert!(
+        doc["providers"].get("old").is_none(),
+        "目标文件旧的 provider 不得残留（干净转换）"
+    );
+    assert_eq!(doc["defaultProvider"], "old", "目标文件的其他顶层字段保留");
+}
+
+#[test]
+fn cross_format_opencode_doc_takes_ui_providers_and_order() {
+    let mut target = json!({
+        "provider": { "old": {} },
+        "agent": { "writer": {} },
+        "mcp": { "srv": { "command": "node" } }
+    });
+    strip_cross_format_containers(ConfigFormat::Opencode, &mut target);
+    let providers = ui_providers(&["b", "a"]);
+    let doc = merge_opencode_root(&target, &[], &providers);
+    let keys: Vec<String> = doc["provider"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    assert_eq!(keys, vec!["b", "a"]);
+    assert!(doc["provider"].get("old").is_none());
+    assert!(doc["agent"].as_object().is_none_or(|o| o.is_empty()));
+    assert_eq!(doc["mcp"]["srv"]["command"], "node");
+}
