@@ -4760,7 +4760,6 @@ mod compact_tests {
 #[cfg(test)]
 mod model_fetch_tests {
     use super::{chat_url, parse_models_response, sanitize_network_error, App};
-
     #[test]
     fn parse_openai_style_models() {
         let text = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4o-mini","object":"model"}]}"#;
@@ -5052,5 +5051,53 @@ mod syntax_highlight_tests {
     fn syntax_dispatch_matches_page_kind() {
         assert_eq!(syntax_tokens("{}", PreviewSyntax::Json).len(), 2);
         assert!(syntax_tokens("a: 1\n", PreviewSyntax::Yaml).len() >= 3);
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::{
+        latency_color, matrix_glyphs, LATENCY_GOOD_MS, LATENCY_GREEN, LATENCY_RED,
+        LATENCY_TIMEOUT_MS, LATENCY_YELLOW, MATRIX_CHARS, MATRIX_LEN,
+    };
+
+    #[test]
+    fn latency_color_thresholds() {
+        assert_eq!(latency_color(0), LATENCY_GREEN);
+        assert_eq!(latency_color(LATENCY_GOOD_MS - 1), LATENCY_GREEN);
+        assert_eq!(latency_color(LATENCY_GOOD_MS), LATENCY_YELLOW);
+        assert_eq!(latency_color(LATENCY_TIMEOUT_MS), LATENCY_YELLOW);
+        assert_eq!(latency_color(LATENCY_TIMEOUT_MS + 1), LATENCY_RED);
+    }
+
+    #[test]
+    fn matrix_glyphs_shape_and_variation() {
+        let frame = matrix_glyphs(7, "provider/model", MATRIX_LEN);
+        assert_eq!(frame.chars().count(), MATRIX_LEN);
+        assert!(frame.chars().all(|c| MATRIX_CHARS.contains(c)));
+        // 同一帧 + 同一 salt 稳定（不依赖保存的随机状态）
+        assert_eq!(frame, matrix_glyphs(7, "provider/model", MATRIX_LEN));
+        // 换行（salt 不同）或换帧都会刷新字符
+        assert_ne!(frame, matrix_glyphs(7, "provider/other", MATRIX_LEN));
+        assert!((8..16).any(|f| frame != matrix_glyphs(f, "provider/model", MATRIX_LEN)));
+    }
+}
+
+#[cfg(test)]
+mod preview_sync_tests {
+    use super::preview_should_rebuild;
+
+    #[test]
+    fn rebuild_gate_ignores_focus_but_keeps_user_text() {
+        // 没在预览里手改：始终按组件状态重建（与焦点无关）
+        assert!(preview_should_rebuild(false, None, 100.0));
+        // 刚在预览里输入（2 秒内）：保留用户文本，避免打断手改
+        assert!(!preview_should_rebuild(false, Some(99.5), 100.0));
+        assert!(!preview_should_rebuild(false, Some(100.0), 100.0));
+        // 停止输入超过 2 秒：回到组件状态（预览不会一直停在旧内容上）
+        assert!(preview_should_rebuild(false, Some(97.9), 100.0));
+        // 上次解析失败：保留用户文本，等用户修正或点「重新生成」
+        assert!(!preview_should_rebuild(true, None, 100.0));
+        assert!(!preview_should_rebuild(true, Some(1.0), 100.0));
     }
 }
