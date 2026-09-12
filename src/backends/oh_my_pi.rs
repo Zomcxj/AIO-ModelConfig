@@ -156,13 +156,7 @@ pub fn provider_to_omp(p: &ProviderRow) -> Value {
             p.raw.as_object().cloned().unwrap_or_default()
         };
 
-    let api = if !p.npm.is_empty() {
-        convert::npm_to_api(&p.npm)
-    } else if !p.pi_api.is_empty() {
-        p.pi_api.clone()
-    } else {
-        "openai-completions".to_string()
-    };
+    let api = p.effective_api();
 
     if !p.base_url.is_empty() {
         let save_url =

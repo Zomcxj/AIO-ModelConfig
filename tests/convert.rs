@@ -61,8 +61,27 @@ fn api_to_npm_mapping() {
         convert::api_to_npm("anthropic-messages"),
         "@ai-sdk/anthropic"
     );
-    assert_eq!(convert::api_to_npm("openai-completions"), "");
-    assert_eq!(convert::api_to_npm("custom-api"), "custom-api");
+    assert_eq!(
+        convert::api_to_npm("google-generative-ai"),
+        "@ai-sdk/google"
+    );
+    // Chat Completions 在 opencode 侧规范化成显式的兼容层包名
+    assert_eq!(
+        convert::api_to_npm("openai-completions"),
+        "@ai-sdk/openai-compatible"
+    );
+    // Responses 对应 @ai-sdk/openai
+    assert_eq!(convert::api_to_npm("openai-responses"), "@ai-sdk/openai");
+    // 无对应 npm 包的 api：留空（写回 pi 时保留它自己的 api，不被改写成兼容层）
+    for api in [
+        "openai-codex-responses",
+        "azure-openai-responses",
+        "bedrock-converse-stream",
+        "google-vertex",
+        "custom-api",
+    ] {
+        assert_eq!(convert::api_to_npm(api), "", "{}", api);
+    }
 }
 
 #[test]
@@ -71,9 +90,16 @@ fn npm_to_api_mapping() {
         convert::npm_to_api("@ai-sdk/anthropic"),
         "anthropic-messages"
     );
-    assert_eq!(convert::npm_to_api(""), "openai-completions");
-    assert_eq!(convert::npm_to_api("@ai-sdk/openai"), "openai-completions");
-    assert_eq!(convert::npm_to_api("custom-npm"), "custom-npm");
+    assert_eq!(
+        convert::npm_to_api("@ai-sdk/google"),
+        "google-generative-ai"
+    );
+    assert_eq!(convert::npm_to_api("@ai-sdk/openai"), "openai-responses");
+    // 未写 npm（空值）/ 显式兼容层 / 未知包都归到 openai-completions
+    // （不再把包名当 api 写出去）
+    for npm in ["", "@ai-sdk/openai-compatible", "custom-npm"] {
+        assert_eq!(convert::npm_to_api(npm), "openai-completions", "{}", npm);
+    }
 }
 
 #[test]
@@ -139,7 +165,13 @@ fn provider_from_pi_basic() {
     assert_eq!(provider.key, "openai");
     assert_eq!(provider.base_url, "https://api.openai.com/v1");
     assert_eq!(provider.api_key, "sk-test");
-    assert!(provider.npm.is_empty());
+    // api=openai-completions 在 opencode 侧对应显式兼容层包名
+    assert_eq!(provider.npm, "@ai-sdk/openai-compatible");
+    // 回写 pi 时仍按该 npm 得出同一个 api
+    assert_eq!(
+        convert::provider_to_pi(&provider)["api"],
+        "openai-completions"
+    );
     assert_eq!(provider.models.len(), 1);
     assert_eq!(provider.models[0].id, "gpt-4o");
 }
@@ -311,8 +343,8 @@ fn anthropic_url_v1_stripped_on_save() {
 }
 
 #[test]
-fn responses_api_maps_to_empty_npm() {
-    assert_eq!(convert::api_to_npm("openai-responses"), "");
+fn responses_api_maps_to_openai_package() {
+    assert_eq!(convert::api_to_npm("openai-responses"), "@ai-sdk/openai");
     let v = json!({
         "baseUrl": "https://example.com/v1",
         "apiKey": "sk-test",
@@ -321,9 +353,36 @@ fn responses_api_maps_to_empty_npm() {
     });
     let provider = convert::provider_from_pi("k", &v);
     assert_eq!(provider.pi_api, "openai-responses");
+    assert_eq!(provider.npm, "@ai-sdk/openai");
+    // 回写 pi 时经 npm 反查仍得 openai-responses（互逆）
     let output = convert::provider_to_pi(&provider);
     assert_eq!(output["api"], "openai-responses");
     assert_eq!(output["baseUrl"], "https://example.com/v1");
+}
+
+#[test]
+fn empty_api_option_clears_raw_fallback() {
+    // 无对应 npm 包的协议：仍应被判定为「显式指定」，下拉才不会误显示「(空)」
+    let v = json!({
+        "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1",
+        "apiKey": "sk-test",
+        "api": "google-vertex",
+        "models": []
+    });
+    let mut provider = convert::provider_from_pi("vertex", &v);
+    assert_eq!(provider.npm, "", "google-vertex 无 npm 对应包");
+    assert!(provider.has_explicit_api());
+    assert_eq!(provider.effective_api(), "google-vertex");
+
+    // 选「(空)」：只清 npm / pi_api 不够，raw.api 也要清，
+    // 否则 effective_api 会从 raw 回退把旧协议写回去，界面与落盘不一致
+    provider.clear_api();
+    assert!(!provider.has_explicit_api());
+    assert_eq!(provider.effective_api(), "openai-completions");
+    assert_eq!(
+        convert::provider_to_pi(&provider)["api"],
+        "openai-completions"
+    );
 }
 
 #[test]

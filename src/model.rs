@@ -583,6 +583,47 @@ impl ProviderRow {
         }
     }
 
+    /// 生效的 api（线上协议）。UI 显示、写盘、延迟测试共用同一套优先级，避免三处口径不一致：
+    /// 1. npm 非空 → 按 npm 包推导（opencode 侧以 npm 表达协议）；
+    /// 2. pi_api 非空 → 直接用（若被误写成 `@ai-sdk/...` 包名，按 npm 解释并自愈）；
+    /// 3. 原文件（raw）里的 api → 保留，兼容 pi-messages / google-vertex 等无 npm 对应的协议；
+    /// 4. 都没有 → 默认兼容层 openai-completions（api 字段始终会写出，不产生非法配置）。
+    pub fn effective_api(&self) -> String {
+        if !self.npm.is_empty() {
+            return crate::convert::npm_to_api(&self.npm);
+        }
+        let api = self.pi_api.trim();
+        if !api.is_empty() {
+            return if api.starts_with("@ai-sdk/") {
+                crate::convert::npm_to_api(api)
+            } else {
+                api.to_string()
+            };
+        }
+        let raw_api = str_at(&self.raw, "api");
+        if !raw_api.is_empty() {
+            return raw_api.to_string();
+        }
+        "openai-completions".to_string()
+    }
+
+    /// 是否显式指定了协议（npm 或 api 任一侧有值），供下拉决定显示「(空)」还是协议名。
+    /// 与 [`Self::effective_api`] 的取值口径一致：二者都认为"没写"才是空。
+    pub fn has_explicit_api(&self) -> bool {
+        !self.npm.is_empty() || !self.pi_api.is_empty() || !str_at(&self.raw, "api").is_empty()
+    }
+
+    /// 选择「(空)」（不指定协议）：清掉 npm / pi_api，并抹掉 raw 里的 api。
+    /// raw 必须一并清理，否则 [`Self::effective_api`] 会从 raw 回退把旧协议写回去，
+    /// 造成界面显示「(空)」而落盘仍是旧协议。
+    pub fn clear_api(&mut self) {
+        self.npm.clear();
+        self.pi_api.clear();
+        if let Value::Object(m) = &mut self.raw {
+            m.remove("api");
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             key: String::new(),

@@ -95,11 +95,7 @@ impl Backend for PiBackend {
     }
 
     fn icon_rgba(&self) -> Option<(&'static [u8], u32, u32)> {
-        Some((
-            include_bytes!("../../assets/agents/pi_32.bin"),
-            32,
-            32,
-        ))
+        Some((include_bytes!("../../assets/agents/pi_32.bin"), 32, 32))
     }
 
     fn render(&self, root: &Value, compact: bool) -> Result<String, String> {

@@ -31,28 +31,35 @@ pub(crate) fn is_official_anthropic_url(url: &str) -> bool {
     u == "https://api.anthropic.com/v1" || u == "https://api.anthropic.com"
 }
 
+/// opencode 的 npm 包 → pi / omp 的 api（线上协议）：
+/// - `@ai-sdk/anthropic` / `@ai-sdk/google` / `@ai-sdk/mistral` 各自对应同名协议；
+/// - `@ai-sdk/openai` 走 Responses（`/v1/responses`）；
+/// - `@ai-sdk/openai-compatible` 与未写 npm（空值）一样，走 OpenAI 兼容层（Chat Completions）；
+/// - 其他未知包按兼容层处理（不再把包名当 api 写出去）。
 pub fn npm_to_api(npm: &str) -> String {
     match npm {
         "@ai-sdk/anthropic" => "anthropic-messages".to_string(),
         "@ai-sdk/google" => "google-generative-ai".to_string(),
-        "" | "@ai-sdk/openai" => "openai-completions".to_string(),
-        other => other.to_string(),
+        "@ai-sdk/mistral" => "mistral-conversations".to_string(),
+        "@ai-sdk/openai" => "openai-responses".to_string(),
+        _ => "openai-completions".to_string(),
     }
 }
 
+/// pi / omp 的 api → opencode 的 npm 包：
+/// - `openai-completions` → `@ai-sdk/openai-compatible`（规范化写法；未写 npm 也是这个语义）；
+/// - `openai-responses` → `@ai-sdk/openai`；
+/// - 无对应包的 api（`openai-codex-responses` / `azure-openai-responses` /
+///   `bedrock-converse-stream` / `google-gemini-cli` / `google-vertex` / `pi-messages` 等）
+///   返回空串：写入 pi 时仍保留 pi 自己的 api 字段，不会被改写成兼容层。
 pub fn api_to_npm(api: &str) -> String {
     match api {
         "anthropic-messages" => "@ai-sdk/anthropic".to_string(),
         "google-generative-ai" => "@ai-sdk/google".to_string(),
-        // 以下 api 无对应 @ai-sdk npm 包（opencode 侧回退默认兼容层）
-        "openai-completions"
-        | "openai-responses"
-        | "openai-codex-responses"
-        | "azure-openai-responses"
-        | "bedrock-converse-stream"
-        | "google-gemini-cli"
-        | "google-vertex" => String::new(),
-        other => other.to_string(),
+        "mistral-conversations" => "@ai-sdk/mistral".to_string(),
+        "openai-completions" => "@ai-sdk/openai-compatible".to_string(),
+        "openai-responses" => "@ai-sdk/openai".to_string(),
+        _ => String::new(),
     }
 }
 
@@ -331,13 +338,7 @@ pub fn provider_to_pi(p: &ProviderRow) -> Value {
         );
         obj.insert("compat".into(), Value::Object(c));
     }
-    let api = if !p.npm.is_empty() {
-        npm_to_api(&p.npm)
-    } else if !p.pi_api.is_empty() {
-        p.pi_api.clone()
-    } else {
-        "openai-completions".to_string()
-    };
+    let api = p.effective_api();
     if !p.base_url.is_empty() {
         let save_url = if api == "anthropic-messages" && is_official_anthropic_url(&p.base_url) {
             p.base_url.trim_end_matches("/v1").to_string()

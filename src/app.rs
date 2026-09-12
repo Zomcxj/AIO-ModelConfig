@@ -1910,11 +1910,7 @@ impl App {
                         .providers
                         .iter()
                         .map(|p| {
-                            let api = if p.pi_api.is_empty() {
-                                convert::npm_to_api(&p.npm)
-                            } else {
-                                p.pi_api.clone()
-                            };
+                            let api = p.effective_api();
                             (
                                 p.key.clone(),
                                 p.base_url.clone(),
@@ -2252,11 +2248,7 @@ impl App {
         let mut latency_models: Option<(String, String, Vec<String>, String)> = None;
         ui.horizontal(|ui| {
             ui.strong("Models");
-            let fetch_api = if p.pi_api.is_empty() {
-                convert::npm_to_api(&p.npm)
-            } else {
-                p.pi_api.clone()
-            };
+            let fetch_api = p.effective_api();
             let fetch_secret = credentials::effective_secret(p);
             if ui.button("获取模型").clicked() {
                 fetch_request = Some((
@@ -2863,11 +2855,7 @@ impl App {
             let mut latency_models: Option<(String, Vec<String>, String)> = None;
             ui.horizontal(|ui| {
                 ui.strong("Models");
-                let fetch_api = if self.new_provider.pi_api.is_empty() {
-                    convert::npm_to_api(&self.new_provider.npm)
-                } else {
-                    self.new_provider.pi_api.clone()
-                };
+                let fetch_api = self.new_provider.effective_api();
                 let fetch_secret = credentials::effective_secret(&self.new_provider);
                 if ui.button("获取模型").clicked() {
                     fetch_request = Some((

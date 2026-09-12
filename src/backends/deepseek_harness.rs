@@ -278,17 +278,9 @@ fn dsh_max_retries(v: &Value) -> String {
 }
 
 fn dsh_api_for(p: &ProviderRow) -> String {
-    let api = if p.pi_api.is_empty() {
-        convert::npm_to_api(&p.npm)
-    } else {
-        p.pi_api.clone()
-    };
-    // openai-compatible 是 opencode 的 npm 名称，不是 DSH 的 api 枚举值。
-    if api == "@ai-sdk/openai-compatible" || api.is_empty() {
-        "openai-completions".to_string()
-    } else {
-        api
-    }
+    // 与 pi / omp / 延迟测试共用同一优先级；
+    // "@ai-sdk/..." 是 opencode 的 npm 名称，不是 DSH 的 api 枚举值，effective_api 已处理。
+    p.effective_api()
 }
 
 fn yaml_scalar(value: &Value) -> String {
